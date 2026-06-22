@@ -12,6 +12,46 @@ st.set_page_config(page_title="PDF Redactor / PDF to XLSX", layout="wide")
 
 st.title("PDF Redactor / PDF to XLSX")
 
+st.markdown("""
+<style>
+
+/* Radio button label */
+div[role="radiogroup"] label {
+    font-size: 2rem !important;
+}
+
+/* Choose Function label */
+div[data-testid="stRadio"] > label {
+    font-size: 2rem !important;
+    font-weight: 600 !important;
+}
+
+/* Upload PDF label */
+div[data-testid="stFileUploader"] > label {
+    font-size: 2rem !important;
+    font-weight: 600 !important;
+}
+
+/* Upload box text */
+div[data-testid="stFileUploader"] small,
+div[data-testid="stFileUploader"] span,
+div[data-testid="stFileUploader"] p {
+    font-size: 1.5rem !important;
+}
+
+/* Browse files button */
+div[data-testid="stFileUploader"] button {
+    font-size: 1.5rem !important;
+}
+
+/* Success messages */
+div[data-testid="stAlert"] {
+    font-size: 1.3rem !important;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
 
 # ============================================================
 # Session / memory cleanup helpers
