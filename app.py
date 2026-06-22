@@ -4,7 +4,6 @@ import streamlit as st
 
 from io import BytesIO
 from PIL import Image, ImageDraw
-from streamlit_drawable_canvas import st_canvas
 from streamlit_image_coordinates import streamlit_image_coordinates
 
 
@@ -43,6 +42,12 @@ if "columns" not in st.session_state:
 
 if "last_ruler_click" not in st.session_state:
     st.session_state.last_ruler_click = {}
+
+if "last_redaction_click" not in st.session_state:
+    st.session_state.last_redaction_click = {}
+
+if "redaction_first_corner" not in st.session_state:
+    st.session_state.redaction_first_corner = {}
 
 page_num = st.selectbox(
     "Select Page",
@@ -94,7 +99,7 @@ def draw_column_overlay(image, columns):
     return preview
 
 
-def draw_redaction_overlay(image, rects):
+def draw_redaction_overlay(image, rects, first_corner=None):
     preview = image.copy()
     draw = ImageDraw.Draw(preview)
 
@@ -104,6 +109,12 @@ def draw_redaction_overlay(image, rects):
         x1 = int(r["x"] + r["w"])
         y1 = int(r["y"] + r["h"])
         draw.rectangle([(x0, y0), (x1, y1)], fill=(0, 0, 0))
+
+    if first_corner is not None:
+        x = int(first_corner["x"])
+        y = int(first_corner["y"])
+        draw.ellipse([(x - 8, y - 8), (x + 8, y + 8)], fill=(255, 0, 0))
+        draw.text((x + 10, y + 10), "1st corner", fill=(255, 0, 0))
 
     return preview
 
@@ -118,6 +129,34 @@ def toggle_column(columns, clicked_x, tolerance=10):
 
     columns.append(clicked_x)
     return sorted(columns)
+
+
+def add_redaction_click(page_num, clicked_x, clicked_y):
+    first_corner = st.session_state.redaction_first_corner.get(page_num)
+
+    if first_corner is None:
+        st.session_state.redaction_first_corner[page_num] = {
+            "x": clicked_x,
+            "y": clicked_y,
+        }
+        return
+
+    x0 = min(first_corner["x"], clicked_x)
+    y0 = min(first_corner["y"], clicked_y)
+    x1 = max(first_corner["x"], clicked_x)
+    y1 = max(first_corner["y"], clicked_y)
+
+    if abs(x1 - x0) >= 5 and abs(y1 - y0) >= 5:
+        st.session_state.redactions[page_num].append(
+            {
+                "x": x0,
+                "y": y0,
+                "w": x1 - x0,
+                "h": y1 - y0,
+            }
+        )
+
+    st.session_state.redaction_first_corner.pop(page_num, None)
 
 
 def group_words_into_rows(words, y_tolerance=4):
@@ -162,16 +201,31 @@ with right_col:
         st.session_state.redactions[page_num] = []
         st.session_state.columns[page_num] = []
         st.session_state.last_ruler_click.pop(page_num, None)
+        st.session_state.last_redaction_click.pop(page_num, None)
+        st.session_state.redaction_first_corner.pop(page_num, None)
         st.rerun()
 
     if task == "Convert PDF to XLSX":
         st.info("Click the ruler to add/remove column boundaries.")
         st.write("Saved column points:")
         st.write(st.session_state.columns.get(page_num, []))
+
     else:
-        st.info("Draw black rectangles over areas to redact.")
+        st.info("Click two opposite corners to create each redaction rectangle.")
         st.write("Saved redaction rectangles:")
         st.write(len(st.session_state.redactions.get(page_num, [])))
+
+        if st.session_state.redaction_first_corner.get(page_num):
+            st.warning("First corner selected. Click the opposite corner.")
+
+        if st.button("Undo Last Redaction"):
+            if st.session_state.redactions.get(page_num):
+                st.session_state.redactions[page_num].pop()
+                st.rerun()
+
+        if st.button("Cancel Current Rectangle"):
+            st.session_state.redaction_first_corner.pop(page_num, None)
+            st.rerun()
 
 
 with left_col:
@@ -287,47 +341,30 @@ with left_col:
     else:
         st.subheader("Redaction Markup")
 
-        st.image(
-            draw_redaction_overlay(
-                page_image,
-                st.session_state.redactions.get(page_num, []),
-            ),
-            caption=f"Page {page_num + 1} preview with saved redactions",
-            use_column_width=False,
+        preview = draw_redaction_overlay(
+            page_image,
+            st.session_state.redactions.get(page_num, []),
+            st.session_state.redaction_first_corner.get(page_num),
         )
 
-        st.caption("Draw rectangles on the canvas below, then click Save Redactions For This Page.")
-
-        canvas_result = st_canvas(
-            fill_color="rgba(0,0,0,0.80)",
-            stroke_width=2,
-            stroke_color="#000000",
-            background_image=page_image,
-            update_streamlit=True,
-            height=page_image.height,
-            width=page_image.width,
-            drawing_mode="rect",
-            key=f"redact_canvas_page_{page_num}",
+        click = streamlit_image_coordinates(
+            preview,
+            key=f"redaction_page_{page_num}",
         )
 
-        if st.button("Save Redactions For This Page"):
-            rects = []
+        if click is not None:
+            clicked_x = int(click["x"])
+            clicked_y = int(click["y"])
+            click_signature = f"{clicked_x}_{clicked_y}"
 
-            if canvas_result.json_data and "objects" in canvas_result.json_data:
-                for obj in canvas_result.json_data["objects"]:
-                    if obj.get("type") == "rect":
-                        rects.append(
-                            {
-                                "x": obj["left"],
-                                "y": obj["top"],
-                                "w": obj["width"] * obj.get("scaleX", 1),
-                                "h": obj["height"] * obj.get("scaleY", 1),
-                            }
-                        )
+            previous_click = st.session_state.last_redaction_click.get(page_num)
 
-            st.session_state.redactions[page_num] = rects
-            st.success(f"Saved {len(rects)} redaction rectangle(s).")
-            st.rerun()
+            if previous_click != click_signature:
+                st.session_state.last_redaction_click[page_num] = click_signature
+                add_redaction_click(page_num, clicked_x, clicked_y)
+                st.rerun()
+
+        st.caption("Click two opposite corners for each redaction box. Saved boxes stay visible.")
 
         if st.button("Generate Redacted PDF"):
             redacted_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
