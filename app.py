@@ -1,8 +1,9 @@
+import gc
+from io import BytesIO
+
 import fitz
 import pandas as pd
 import streamlit as st
-
-from io import BytesIO
 from PIL import Image, ImageDraw
 from streamlit_image_coordinates import streamlit_image_coordinates
 
@@ -11,28 +12,23 @@ st.set_page_config(page_title="PDF Redactor / PDF to XLSX", layout="wide")
 
 st.title("PDF Redactor / PDF to XLSX")
 
-task = st.radio(
-    "Choose Function",
-    ["Redact PDF", "Convert PDF to XLSX"],
-    horizontal=True,
-)
 
-uploaded = st.file_uploader("Upload PDF", type=["pdf"])
+# ============================================================
+# Session / memory cleanup helpers
+# ============================================================
 
-if uploaded is None:
-    st.stop()
 
-pdf_bytes = uploaded.getvalue()
+def hard_reset_app():
+    """Clear Streamlit state and rotate the uploader key so the uploaded file is released."""
+    next_upload_key = st.session_state.get("uploader_key", 0) + 1
+    st.session_state.clear()
+    st.session_state["uploader_key"] = next_upload_key
+    gc.collect()
+    st.rerun()
 
-try:
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-except Exception as e:
-    st.error(f"Unable to open PDF: {e}")
-    st.stop()
 
-st.success(f"Loaded PDF with {len(doc)} page(s).")
-
-zoom = 1.5
+if "uploader_key" not in st.session_state:
+    st.session_state["uploader_key"] = 0
 
 if "redactions" not in st.session_state:
     st.session_state.redactions = {}
@@ -49,18 +45,69 @@ if "last_redaction_click" not in st.session_state:
 if "redaction_first_corner" not in st.session_state:
     st.session_state.redaction_first_corner = {}
 
+
+with st.sidebar:
+    st.subheader("Privacy / Cleanup")
+    st.caption(
+        "This version does not intentionally save uploaded PDFs or generated files. "
+        "Use this button after downloading your result to clear the session state and release in-memory objects."
+    )
+    if st.button("Clear uploaded PDF and reset app"):
+        hard_reset_app()
+
+
+task = st.radio(
+    "Choose Function",
+    ["Redact PDF", "Convert PDF to XLSX"],
+    horizontal=True,
+)
+
+uploaded = st.file_uploader(
+    "Upload PDF",
+    type=["pdf"],
+    key=f"pdf_upload_{st.session_state.uploader_key}",
+)
+
+if uploaded is None:
+    st.stop()
+
+pdf_bytes = uploaded.getvalue()
+
+# Open the document only long enough to validate it, get page count, and render the selected page.
+try:
+    view_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page_count = len(view_doc)
+except Exception as e:
+    st.error(f"Unable to open PDF: {e}")
+    gc.collect()
+    st.stop()
+
+st.success(f"Loaded PDF with {page_count} page(s).")
+
+zoom = 1.5
+
 page_num = st.selectbox(
     "Select Page",
-    list(range(len(doc))),
+    list(range(page_count)),
     format_func=lambda x: f"Page {x + 1}",
 )
 
-page = doc[page_num]
-pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-page_image = Image.open(BytesIO(pix.tobytes("png"))).convert("RGB")
+try:
+    page = view_doc[page_num]
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    page_image = Image.open(BytesIO(pix.tobytes("png"))).convert("RGB")
+finally:
+    view_doc.close()
+    del view_doc
+    gc.collect()
 
 st.session_state.redactions.setdefault(page_num, [])
 st.session_state.columns.setdefault(page_num, [])
+
+
+# ============================================================
+# UI drawing helpers
+# ============================================================
 
 
 def make_ruler(width, height=70, columns=None):
@@ -159,6 +206,11 @@ def add_redaction_click(page_num, clicked_x, clicked_y):
     st.session_state.redaction_first_corner.pop(page_num, None)
 
 
+# ============================================================
+# XLSX extraction helpers
+# ============================================================
+
+
 def group_words_into_rows(words, y_tolerance=4):
     rows = []
 
@@ -192,6 +244,10 @@ def assign_word_to_column(word, boundaries):
     return None
 
 
+# ============================================================
+# Main app layout
+# ============================================================
+
 left_col, right_col = st.columns([4, 1])
 
 with right_col:
@@ -203,6 +259,7 @@ with right_col:
         st.session_state.last_ruler_click.pop(page_num, None)
         st.session_state.last_redaction_click.pop(page_num, None)
         st.session_state.redaction_first_corner.pop(page_num, None)
+        gc.collect()
         st.rerun()
 
     if task == "Convert PDF to XLSX":
@@ -221,10 +278,12 @@ with right_col:
         if st.button("Undo Last Redaction"):
             if st.session_state.redactions.get(page_num):
                 st.session_state.redactions[page_num].pop()
+                gc.collect()
                 st.rerun()
 
         if st.button("Cancel Current Rectangle"):
             st.session_state.redaction_first_corner.pop(page_num, None)
+            gc.collect()
             st.rerun()
 
 
@@ -271,72 +330,83 @@ with left_col:
         )
 
         if st.button("Generate XLSX"):
-            source_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            source_doc = None
             output_xlsx = BytesIO()
 
-            with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
-                wrote_sheet = False
+            try:
+                source_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-                for pnum in range(len(source_doc)):
-                    p = source_doc[pnum]
-                    raw_columns = st.session_state.columns.get(pnum, [])
+                with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
+                    wrote_sheet = False
 
-                    if not raw_columns:
-                        continue
+                    for pnum in range(len(source_doc)):
+                        p = source_doc[pnum]
+                        raw_columns = st.session_state.columns.get(pnum, [])
 
-                    pdf_columns = sorted([x / zoom for x in raw_columns])
-                    boundaries = [0] + pdf_columns + [p.rect.width]
+                        if not raw_columns:
+                            continue
 
-                    words = p.get_text("words")
-                    rows = group_words_into_rows(words)
+                        pdf_columns = sorted([x / zoom for x in raw_columns])
+                        boundaries = [0] + pdf_columns + [p.rect.width]
 
-                    table_rows = []
+                        words = p.get_text("words")
+                        rows = group_words_into_rows(words)
 
-                    for row in rows:
-                        cells = [""] * (len(boundaries) - 1)
+                        table_rows = []
 
-                        for word in sorted(row["words"], key=lambda w: w[0]):
-                            col_index = assign_word_to_column(word, boundaries)
+                        for row in rows:
+                            cells = [""] * (len(boundaries) - 1)
 
-                            if col_index is not None:
-                                cells[col_index] = (
-                                    cells[col_index] + " " + word[4]
-                                ).strip()
+                            for word in sorted(row["words"], key=lambda w: w[0]):
+                                col_index = assign_word_to_column(word, boundaries)
 
-                        if any(cell.strip() for cell in cells):
-                            table_rows.append(cells)
+                                if col_index is not None:
+                                    cells[col_index] = (
+                                        cells[col_index] + " " + word[4]
+                                    ).strip()
 
-                    if table_rows:
-                        df = pd.DataFrame(table_rows)
+                            if any(cell.strip() for cell in cells):
+                                table_rows.append(cells)
 
-                        df.to_excel(
+                        if table_rows:
+                            df = pd.DataFrame(table_rows)
+
+                            df.to_excel(
+                                writer,
+                                sheet_name=f"Page_{pnum + 1}",
+                                index=False,
+                                header=False,
+                            )
+
+                            wrote_sheet = True
+
+                    if not wrote_sheet:
+                        pd.DataFrame(
+                            [["No columns marked or no extractable text found."]]
+                        ).to_excel(
                             writer,
-                            sheet_name=f"Page_{pnum + 1}",
+                            sheet_name="Result",
                             index=False,
                             header=False,
                         )
 
-                        wrote_sheet = True
+                output_xlsx.seek(0)
+                output_bytes = output_xlsx.getvalue()
 
-                if not wrote_sheet:
-                    pd.DataFrame(
-                        [["No columns marked or no extractable text found."]]
-                    ).to_excel(
-                        writer,
-                        sheet_name="Result",
-                        index=False,
-                        header=False,
-                    )
-
-            source_doc.close()
-            output_xlsx.seek(0)
+            finally:
+                if source_doc is not None:
+                    source_doc.close()
+                output_xlsx.close()
+                gc.collect()
 
             st.download_button(
                 label="Download XLSX",
-                data=output_xlsx.getvalue(),
+                data=output_bytes,
                 file_name="extracted.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
+
+            st.caption("After downloading, use 'Clear uploaded PDF and reset app' in the sidebar.")
 
     else:
         st.subheader("Redaction Markup")
@@ -367,30 +437,49 @@ with left_col:
         st.caption("Click two opposite corners for each redaction box. Saved boxes stay visible.")
 
         if st.button("Generate Redacted PDF"):
-            redacted_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-
-            for pnum, rects in st.session_state.redactions.items():
-                p = redacted_doc[pnum]
-
-                for r in rects:
-                    x0 = r["x"] / zoom
-                    y0 = r["y"] / zoom
-                    x1 = (r["x"] + r["w"]) / zoom
-                    y1 = (r["y"] + r["h"]) / zoom
-
-                    rect = fitz.Rect(x0, y0, x1, y1)
-                    p.add_redact_annot(rect, fill=(0, 0, 0))
-
-                p.apply_redactions()
-
+            redacted_doc = None
             output_pdf = BytesIO()
-            redacted_doc.save(output_pdf)
-            redacted_doc.close()
-            output_pdf.seek(0)
+
+            try:
+                redacted_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+                for pnum, rects in st.session_state.redactions.items():
+                    p = redacted_doc[pnum]
+
+                    for r in rects:
+                        x0 = r["x"] / zoom
+                        y0 = r["y"] / zoom
+                        x1 = (r["x"] + r["w"]) / zoom
+                        y1 = (r["y"] + r["h"]) / zoom
+
+                        rect = fitz.Rect(x0, y0, x1, y1)
+                        p.add_redact_annot(rect, fill=(0, 0, 0))
+
+                    p.apply_redactions()
+
+                redacted_doc.save(output_pdf)
+                output_pdf.seek(0)
+                output_bytes = output_pdf.getvalue()
+
+            finally:
+                if redacted_doc is not None:
+                    redacted_doc.close()
+                output_pdf.close()
+                gc.collect()
 
             st.download_button(
                 label="Download Redacted PDF",
-                data=output_pdf.getvalue(),
+                data=output_bytes,
                 file_name="redacted.pdf",
                 mime="application/pdf",
             )
+
+            st.caption("After downloading, use 'Clear uploaded PDF and reset app' in the sidebar.")
+
+# Release render-only objects at the end of each run.
+del page_image
+try:
+    del pdf_bytes
+except NameError:
+    pass
+gc.collect()
