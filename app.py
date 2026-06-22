@@ -51,7 +51,6 @@ page_num = st.selectbox(
 )
 
 page = doc[page_num]
-
 pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
 page_image = Image.open(BytesIO(pix.tobytes("png"))).convert("RGB")
 
@@ -91,6 +90,20 @@ def draw_column_overlay(image, columns):
             fill=(0, 0, 255),
             width=4,
         )
+
+    return preview
+
+
+def draw_redaction_overlay(image, rects):
+    preview = image.copy()
+    draw = ImageDraw.Draw(preview)
+
+    for r in rects:
+        x0 = int(r["x"])
+        y0 = int(r["y"])
+        x1 = int(r["x"] + r["w"])
+        y1 = int(r["y"] + r["h"])
+        draw.rectangle([(x0, y0), (x1, y1)], fill=(0, 0, 0))
 
     return preview
 
@@ -155,9 +168,10 @@ with right_col:
         st.info("Click the ruler to add/remove column boundaries.")
         st.write("Saved column points:")
         st.write(st.session_state.columns.get(page_num, []))
-
     else:
         st.info("Draw black rectangles over areas to redact.")
+        st.write("Saved redaction rectangles:")
+        st.write(len(st.session_state.redactions.get(page_num, [])))
 
 
 with left_col:
@@ -179,7 +193,6 @@ with left_col:
         if click is not None:
             clicked_x = int(click["x"])
             clicked_y = int(click["y"])
-
             click_signature = f"{clicked_x}_{clicked_y}"
 
             previous_click = st.session_state.last_ruler_click.get(page_num)
@@ -274,6 +287,17 @@ with left_col:
     else:
         st.subheader("Redaction Markup")
 
+        st.image(
+            draw_redaction_overlay(
+                page_image,
+                st.session_state.redactions.get(page_num, []),
+            ),
+            caption=f"Page {page_num + 1} preview with saved redactions",
+            use_column_width=False,
+        )
+
+        st.caption("Draw rectangles on the canvas below, then click Save Redactions For This Page.")
+
         canvas_result = st_canvas(
             fill_color="rgba(0,0,0,0.80)",
             stroke_width=2,
@@ -303,6 +327,7 @@ with left_col:
 
             st.session_state.redactions[page_num] = rects
             st.success(f"Saved {len(rects)} redaction rectangle(s).")
+            st.rerun()
 
         if st.button("Generate Redacted PDF"):
             redacted_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
