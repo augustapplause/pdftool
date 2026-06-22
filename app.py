@@ -104,6 +104,55 @@ finally:
 st.session_state.redactions.setdefault(page_num, [])
 st.session_state.columns.setdefault(page_num, [])
 
+show_document_status(page_count)
+
+
+
+
+# ============================================================
+# Status summary helpers
+# ============================================================
+
+
+def get_page_count_summary(mapping, page_count, item_label):
+    """Return human-readable per-page counts for saved redactions/columns."""
+    lines = []
+
+    for pnum in range(page_count):
+        count = len(mapping.get(pnum, []))
+        lines.append(f"Page {pnum + 1}: {count} {item_label if count == 1 else item_label + 's'}")
+
+    return lines
+
+
+def show_document_status(page_count):
+    """Display saved redaction and column-marker counts for every page."""
+    st.subheader("Document Status")
+
+    redaction_lines = get_page_count_summary(
+        st.session_state.redactions,
+        page_count,
+        "redaction",
+    )
+
+    column_lines = get_page_count_summary(
+        st.session_state.columns,
+        page_count,
+        "column marker",
+    )
+
+    status_col1, status_col2 = st.columns(2)
+
+    with status_col1:
+        st.markdown("**Redactions**")
+        for line in redaction_lines:
+            st.write(line)
+
+    with status_col2:
+        st.markdown("**Column markers**")
+        for line in column_lines:
+            st.write(line)
+
 
 # ============================================================
 # UI drawing helpers
