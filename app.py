@@ -1,5 +1,6 @@
 import base64
 import gc
+import html
 import re
 from io import BytesIO
 
@@ -65,6 +66,17 @@ div[data-testid="stAlert"] {
 .xlsx-scroll-window img {
     display: block;
     max-width: none !important;
+}
+
+/* XLSX column-markup scroll area.
+   The ruler and PDF preview are inside one independent iframe scroll window.
+   The ruler stays sticky at the top of that window and scrolls horizontally
+   with the PDF image. */
+.xlsx-frame {
+    width: 100%;
+    height: 720px;
+    border: 1px solid #cccccc;
+    background: #ffffff;
 }
 
 </style>
@@ -251,22 +263,6 @@ def draw_column_overlay(image, columns):
     return preview
 
 
-def combine_ruler_and_preview(ruler_image, preview_image):
-    """Create one clickable image containing the ruler and PDF preview.
-
-    This avoids duplicate rulers and keeps ruler marks and PDF column lines
-    perfectly aligned because they are rendered in the same image.
-    """
-    width = max(ruler_image.width, preview_image.width)
-    height = ruler_image.height + preview_image.height
-
-    combined = Image.new("RGB", (width, height), "white")
-    combined.paste(ruler_image, (0, 0))
-    combined.paste(preview_image, (0, ruler_image.height))
-
-    return combined
-
-
 def draw_redaction_overlay(image, rects, first_corner=None):
     preview = image.copy()
     draw = ImageDraw.Draw(preview)
@@ -296,35 +292,123 @@ def image_to_base64_png(image):
         buffer.close()
 
 
-def show_scrollable_xlsx_markup(ruler_image, preview_image, caption=None):
-    """Render the ruler and PDF preview in one shared scrollable window.
+def make_clickable_ruler_html(page_num, width, height, columns):
+    """Build a sticky clickable ruler for the PDF scroll iframe."""
+    ticks = []
+    labels = []
+    markers = []
+    click_zones = []
 
-    The ruler is sticky at the top and scrolls horizontally with the PDF image,
-    keeping column demarcation marks aligned with the PDF below.
+    for x in range(0, width, 10):
+        tick_height = 25 if x % 50 == 0 else 10
+        ticks.append(
+            f'<div style="position:absolute;left:{x}px;top:0;width:1px;height:{tick_height}px;background:#000;"></div>'
+        )
+
+        if x % 50 == 0:
+            labels.append(
+                f'<div style="position:absolute;left:{x + 3}px;top:30px;font-size:14px;color:#000;">{x}</div>'
+            )
+
+    # Five-pixel click zones allow column placement/removal directly from the ruler.
+    for x in range(0, width, 5):
+        click_zones.append(
+            f'<a href="?col_click={page_num}_{x}" target="_parent" '
+            f'title="Set/remove column at {x}" '
+            f'style="position:absolute;left:{x}px;top:0;width:5px;height:{height}px;display:block;text-decoration:none;z-index:30;"></a>'
+        )
+
+    for x in sorted([int(v) for v in columns]):
+        markers.append(
+            f'<div style="position:absolute;left:{x}px;top:0;width:4px;height:{height}px;background:#0000ff;z-index:20;"></div>'
+        )
+        markers.append(
+            f'<div style="position:absolute;left:{x - 6}px;top:{height - 18}px;width:12px;height:12px;border-radius:50%;background:#0000ff;z-index:21;"></div>'
+        )
+
+    return f"""
+    <div id="ruler" style="position:sticky;top:0;z-index:50;width:{width}px;height:{height}px;background:#fff;border-bottom:1px solid #777;">
+        <div style="position:absolute;left:0;top:0;width:{width - 1}px;height:{height - 1}px;border:1px solid #505050;"></div>
+        {''.join(ticks)}
+        {''.join(labels)}
+        {''.join(markers)}
+        {''.join(click_zones)}
+    </div>
     """
-    ruler_b64 = image_to_base64_png(ruler_image)
-    preview_b64 = image_to_base64_png(preview_image)
-    content_width = max(ruler_image.width, preview_image.width)
 
-    caption_html = ""
-    if caption:
-        caption_html = f'<div style="font-size:0.9rem; color:#555; margin-top:0.35rem;">{caption}</div>'
+
+def show_scrollable_clickable_xlsx_markup(page_num, preview_image, columns, ruler_height=70, caption=None):
+    """Render ruler and PDF in one independent scroll window.
+
+    The ruler is inside the PDF scroll window, stays fixed at the top during
+    vertical scrolling, scrolls left/right with the PDF, and is clickable.
+    """
+    preview_b64 = image_to_base64_png(preview_image)
+    content_width = preview_image.width
+    content_height = preview_image.height + ruler_height
+
+    ruler_html = make_clickable_ruler_html(
+        page_num=page_num,
+        width=content_width,
+        height=ruler_height,
+        columns=columns,
+    )
+
+    frame_html = f"""
+    <!doctype html>
+    <html>
+    <head>
+    <style>
+        html, body {{
+            margin: 0;
+            padding: 0;
+            background: #ffffff;
+            overflow: auto;
+            font-family: sans-serif;
+        }}
+        #content {{
+            width: {content_width}px;
+            min-height: {content_height}px;
+            position: relative;
+            background: #ffffff;
+        }}
+        img {{
+            display: block;
+            max-width: none;
+        }}
+        a:hover {{
+            background: rgba(0, 0, 255, 0.08);
+        }}
+    </style>
+    </head>
+    <body>
+        <div id="content">
+            {ruler_html}
+            <img
+                src="data:image/png;base64,{preview_b64}"
+                width="{preview_image.width}"
+                height="{preview_image.height}"
+            >
+        </div>
+    </body>
+    </html>
+    """
+
+    frame_b64 = base64.b64encode(frame_html.encode("utf-8")).decode("utf-8")
 
     st.markdown(
         f"""
-        <div class="xlsx-scroll-window">
-            <div class="xlsx-scroll-content" style="width:{content_width}px;">
-                <div class="xlsx-sticky-ruler">
-                    <img src="data:image/png;base64,{ruler_b64}" width="{ruler_image.width}" height="{ruler_image.height}">
-                </div>
-                <img src="data:image/png;base64,{preview_b64}" width="{preview_image.width}" height="{preview_image.height}">
-            </div>
-        </div>
-        {caption_html}
+        <iframe
+            class="xlsx-frame"
+            src="data:text/html;base64,{frame_b64}"
+            scrolling="yes">
+        </iframe>
         """,
         unsafe_allow_html=True,
     )
 
+    if caption:
+        st.caption(caption)
 
 def toggle_column(columns, clicked_x, tolerance=10):
     columns = list(columns)
@@ -557,51 +641,46 @@ with left_col:
 
         current_columns = st.session_state.columns.get(page_num, [])
 
-        ruler_height = 70
+        # Handle ruler clicks coming back from the independent PDF scroll window.
+        query_params = st.query_params
+        col_click = query_params.get("col_click")
 
-        ruler = make_ruler(
-            width=page_image.width,
-            height=ruler_height,
-            columns=current_columns,
-        )
+        if col_click:
+            try:
+                clicked_page_str, clicked_x_str = str(col_click).split("_", 1)
+                clicked_page = int(clicked_page_str)
+                clicked_x = int(float(clicked_x_str))
+
+                if clicked_page == page_num:
+                    previous_click = st.session_state.last_ruler_click.get(page_num)
+
+                    if previous_click != str(col_click):
+                        st.session_state.last_ruler_click[page_num] = str(col_click)
+                        st.session_state.columns[page_num] = toggle_column(
+                            current_columns,
+                            clicked_x,
+                        )
+                        st.query_params.clear()
+                        st.rerun()
+            except Exception:
+                st.query_params.clear()
+
+        current_columns = st.session_state.columns.get(page_num, [])
 
         preview = draw_column_overlay(
             page_image,
             current_columns,
         )
 
-        combined_markup = combine_ruler_and_preview(
-            ruler,
-            preview,
-        )
-
-        click = streamlit_image_coordinates(
-            combined_markup,
-            width=page_image.width,
-            key=f"xlsx_combined_markup_page_{page_num}",
-        )
-
-        if click is not None:
-            clicked_x = int(click["x"])
-            clicked_y = int(click["y"])
-
-            # Only ruler clicks add/remove column points. Clicks on the PDF preview are ignored.
-            if clicked_y <= ruler_height:
-                click_signature = f"{clicked_x}_{clicked_y}"
-
-                previous_click = st.session_state.last_ruler_click.get(page_num)
-
-                if previous_click != click_signature:
-                    st.session_state.last_ruler_click[page_num] = click_signature
-                    st.session_state.columns[page_num] = toggle_column(
-                        current_columns,
-                        clicked_x,
-                    )
-                    st.rerun()
-
-        st.caption(
-            f"Page {page_num + 1}: click the ruler to add/remove column boundaries. "
-            "The ruler and PDF are rendered as one aligned image."
+        show_scrollable_clickable_xlsx_markup(
+            page_num=page_num,
+            preview_image=preview,
+            columns=current_columns,
+            caption=(
+                f"Page {page_num + 1}: click the ruler inside the PDF scroll window "
+                "to add/remove column boundaries. The ruler stays fixed at the top "
+                "and scrolls left/right with the PDF."
+            ),
         )
 
         if st.button("Generate XLSX"):
