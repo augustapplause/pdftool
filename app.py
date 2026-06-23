@@ -1,7 +1,9 @@
 import base64
 import gc
+import os
 import html
 import re
+import tempfile
 from io import BytesIO
 
 import fitz
@@ -143,6 +145,10 @@ if uploaded is not None:
 
 if uploaded is None and "pdf_bytes" not in st.session_state:
     st.stop()
+
+# Remove stale ruler-click URL parameters from older versions.
+if "col_click" in st.query_params:
+    st.query_params.clear()
 
 pdf_bytes = st.session_state["pdf_bytes"]
 
@@ -295,50 +301,254 @@ def image_to_base64_png(image):
         buffer.close()
 
 
-def make_clickable_ruler_html(page_num, width, height, columns):
-    """Build a sticky clickable ruler inside the PDF scroll window."""
-    ticks = []
-    labels = []
-    markers = []
-    click_zones = []
+def get_xlsx_ruler_component():
+    """Create/load a tiny local Streamlit component for ruler clicks.
 
-    for x in range(0, width, 10):
-        tick_height = 25 if x % 50 == 0 else 10
-        ticks.append(
-            f'<div class="tick" style="left:{x}px;height:{tick_height}px;"></div>'
-        )
-
-        if x % 50 == 0:
-            labels.append(
-                f'<div class="label" style="left:{x + 3}px;">{x}</div>'
-            )
-
-    # Five-pixel click zones allow multiple column demarcations to be set/removed.
-    # These are divs instead of links. JavaScript below sends the click to the
-    # parent Streamlit page as ?col_click=<page>_<x>.
-    for x in range(0, width, 5):
-        click_zones.append(
-            f'<div class="click-zone" data-col-click="{page_num}_{x}" '
-            f'title="Set/remove column at {x}" style="left:{x}px;"></div>'
-        )
-
-    for x in sorted([int(v) for v in columns]):
-        markers.append(
-            f'<div class="marker-line" style="left:{x}px;"></div>'
-        )
-        markers.append(
-            f'<div class="marker-dot" style="left:{x - 6}px;"></div>'
-        )
-
-    return f"""
-    <div id="ruler">
-        <div id="ruler-border"></div>
-        {''.join(ticks)}
-        {''.join(labels)}
-        {''.join(markers)}
-        {''.join(click_zones)}
-    </div>
+    This avoids URL navigation. The component sends clicked ruler x-values
+    directly back to Python through Streamlit's component message protocol.
     """
+    component_dir = os.path.join(tempfile.gettempdir(), "xlsx_ruler_component_v1")
+    os.makedirs(component_dir, exist_ok=True)
+
+    index_path = os.path.join(component_dir, "index.html")
+
+    component_html = r"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+    html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #ffffff;
+        font-family: sans-serif;
+    }
+
+    #scroll-window {
+        width: 100%;
+        height: 720px;
+        overflow: auto;
+        border: 1px solid #cccccc;
+        background: #ffffff;
+        box-sizing: border-box;
+    }
+
+    #content {
+        position: relative;
+        background: #ffffff;
+    }
+
+    #ruler {
+        position: sticky;
+        top: 0;
+        z-index: 1000;
+        background: #ffffff;
+        border-bottom: 1px solid #777777;
+        box-sizing: border-box;
+    }
+
+    #ruler-border {
+        position: absolute;
+        left: 0;
+        top: 0;
+        border: 1px solid #505050;
+        box-sizing: border-box;
+        pointer-events: none;
+    }
+
+    .tick {
+        position: absolute;
+        top: 0;
+        width: 1px;
+        background: #000000;
+        pointer-events: none;
+    }
+
+    .label {
+        position: absolute;
+        top: 30px;
+        font-size: 14px;
+        color: #000000;
+        pointer-events: none;
+    }
+
+    .marker-line {
+        position: absolute;
+        top: 0;
+        width: 4px;
+        background: #0000ff;
+        z-index: 1500;
+        pointer-events: none;
+    }
+
+    .marker-dot {
+        position: absolute;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #0000ff;
+        z-index: 1501;
+        pointer-events: none;
+    }
+
+    .click-zone {
+        position: absolute;
+        top: 0;
+        width: 5px;
+        display: block;
+        cursor: pointer;
+        z-index: 2000;
+    }
+
+    .click-zone:hover {
+        background: rgba(0, 0, 255, 0.10);
+    }
+
+    img {
+        display: block;
+        max-width: none;
+    }
+</style>
+</head>
+<body>
+<div id="scroll-window">
+    <div id="content"></div>
+</div>
+
+<script>
+    function sendMessageToStreamlitClient(type, data) {
+        window.parent.postMessage(
+            Object.assign({ isStreamlitMessage: true, type: type }, data),
+            "*"
+        );
+    }
+
+    function setFrameHeight(height) {
+        sendMessageToStreamlitClient("streamlit:setFrameHeight", { height: height });
+    }
+
+    function setComponentValue(value) {
+        sendMessageToStreamlitClient("streamlit:setComponentValue", {
+            value: value,
+            dataType: "json"
+        });
+    }
+
+    function buildRuler(args) {
+        const width = args.width;
+        const height = args.ruler_height;
+        const columns = args.columns || [];
+        const pageNum = args.page_num;
+
+        const ruler = document.createElement("div");
+        ruler.id = "ruler";
+        ruler.style.width = width + "px";
+        ruler.style.height = height + "px";
+
+        const border = document.createElement("div");
+        border.id = "ruler-border";
+        border.style.width = (width - 1) + "px";
+        border.style.height = (height - 1) + "px";
+        ruler.appendChild(border);
+
+        for (let x = 0; x < width; x += 10) {
+            const tick = document.createElement("div");
+            tick.className = "tick";
+            tick.style.left = x + "px";
+            tick.style.height = (x % 50 === 0 ? 25 : 10) + "px";
+            ruler.appendChild(tick);
+
+            if (x % 50 === 0) {
+                const label = document.createElement("div");
+                label.className = "label";
+                label.style.left = (x + 3) + "px";
+                label.textContent = String(x);
+                ruler.appendChild(label);
+            }
+        }
+
+        columns.forEach(function(rawX) {
+            const x = Math.round(Number(rawX));
+
+            const line = document.createElement("div");
+            line.className = "marker-line";
+            line.style.left = x + "px";
+            line.style.height = height + "px";
+            ruler.appendChild(line);
+
+            const dot = document.createElement("div");
+            dot.className = "marker-dot";
+            dot.style.left = (x - 6) + "px";
+            dot.style.top = (height - 18) + "px";
+            ruler.appendChild(dot);
+        });
+
+        for (let x = 0; x < width; x += 5) {
+            const zone = document.createElement("div");
+            zone.className = "click-zone";
+            zone.style.left = x + "px";
+            zone.style.height = height + "px";
+            zone.title = "Set/remove column at " + x;
+
+            zone.addEventListener("click", function(event) {
+                event.preventDefault();
+                event.stopPropagation();
+
+                setComponentValue({
+                    page_num: pageNum,
+                    x: x,
+                    nonce: Date.now() + "_" + Math.random().toString(36).slice(2)
+                });
+            });
+
+            ruler.appendChild(zone);
+        }
+
+        return ruler;
+    }
+
+    function render(args) {
+        const width = args.width;
+        const previewHeight = args.preview_height;
+        const rulerHeight = args.ruler_height;
+
+        const content = document.getElementById("content");
+        content.innerHTML = "";
+        content.style.width = width + "px";
+        content.style.minHeight = (previewHeight + rulerHeight) + "px";
+
+        content.appendChild(buildRuler(args));
+
+        const img = document.createElement("img");
+        img.src = "data:image/png;base64," + args.preview_b64;
+        img.width = width;
+        img.height = previewHeight;
+        content.appendChild(img);
+
+        setFrameHeight(735);
+    }
+
+    window.addEventListener("message", function(event) {
+        if (event.data && event.data.type === "streamlit:render") {
+            render(event.data.args || {});
+        }
+    });
+
+    sendMessageToStreamlitClient("streamlit:componentReady", { apiVersion: 1 });
+    setFrameHeight(735);
+</script>
+</body>
+</html>
+"""
+
+    with open(index_path, "w", encoding="utf-8") as f:
+        f.write(component_html)
+
+    return components.declare_component("xlsx_ruler_component", path=component_dir)
 
 
 def show_scrollable_clickable_xlsx_markup(page_num, preview_image, columns, ruler_height=70, caption=None):
@@ -346,170 +556,26 @@ def show_scrollable_clickable_xlsx_markup(page_num, preview_image, columns, rule
 
     The ruler stays visible at the top of the PDF window while vertically
     scrolling and stays horizontally aligned with all PDF column lines.
+    Ruler clicks are returned to Python without navigating away from the app.
     """
     preview_b64 = image_to_base64_png(preview_image)
-    content_width = preview_image.width
-    content_height = preview_image.height + ruler_height
+    component = get_xlsx_ruler_component()
 
-    ruler_html = make_clickable_ruler_html(
+    click_result = component(
         page_num=page_num,
-        width=content_width,
-        height=ruler_height,
-        columns=columns,
+        width=preview_image.width,
+        preview_height=preview_image.height,
+        ruler_height=ruler_height,
+        columns=[int(x) for x in columns],
+        preview_b64=preview_b64,
+        key=f"xlsx_ruler_component_page_{page_num}",
+        default=None,
     )
-
-    component_html = f"""
-    <!doctype html>
-    <html>
-    <head>
-    <style>
-        html, body {{
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background: #ffffff;
-            font-family: sans-serif;
-        }}
-
-        #scroll-window {{
-            width: 100%;
-            height: 720px;
-            overflow: auto;
-            border: 1px solid #cccccc;
-            background: #ffffff;
-            box-sizing: border-box;
-        }}
-
-        #content {{
-            width: {content_width}px;
-            min-height: {content_height}px;
-            position: relative;
-            background: #ffffff;
-        }}
-
-        #ruler {{
-            position: sticky;
-            top: 0;
-            z-index: 1000;
-            width: {content_width}px;
-            height: {ruler_height}px;
-            background: #ffffff;
-            border-bottom: 1px solid #777777;
-            box-sizing: border-box;
-        }}
-
-        #ruler-border {{
-            position: absolute;
-            left: 0;
-            top: 0;
-            width: {content_width - 1}px;
-            height: {ruler_height - 1}px;
-            border: 1px solid #505050;
-            box-sizing: border-box;
-            pointer-events: none;
-        }}
-
-        .tick {{
-            position: absolute;
-            top: 0;
-            width: 1px;
-            background: #000000;
-            pointer-events: none;
-        }}
-
-        .label {{
-            position: absolute;
-            top: 30px;
-            font-size: 14px;
-            color: #000000;
-            pointer-events: none;
-        }}
-
-        .marker-line {{
-            position: absolute;
-            top: 0;
-            width: 4px;
-            height: {ruler_height}px;
-            background: #0000ff;
-            z-index: 1500;
-            pointer-events: none;
-        }}
-
-        .marker-dot {{
-            position: absolute;
-            top: {ruler_height - 18}px;
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background: #0000ff;
-            z-index: 1501;
-            pointer-events: none;
-        }}
-
-        .click-zone {{
-            position: absolute;
-            top: 0;
-            width: 5px;
-            height: {ruler_height}px;
-            display: block;
-            cursor: pointer;
-            z-index: 2000;
-        }}
-
-        .click-zone:hover {{
-            background: rgba(0, 0, 255, 0.10);
-        }}
-
-        img {{
-            display: block;
-            max-width: none;
-        }}
-    </style>
-    </head>
-    <body>
-        <div id="scroll-window">
-            <div id="content">
-                {ruler_html}
-                <img
-                    src="data:image/png;base64,{preview_b64}"
-                    width="{preview_image.width}"
-                    height="{preview_image.height}"
-                >
-            </div>
-        </div>
-        <script>
-            function sendColumnClick(value) {{
-                try {{
-                    const parentUrl = new URL(window.parent.location.href);
-                    parentUrl.searchParams.set("col_click", value);
-                    window.parent.location.href = parentUrl.toString();
-                }} catch (err) {{
-                    try {{
-                        window.top.location.href = "?col_click=" + encodeURIComponent(value);
-                    }} catch (err2) {{
-                        window.location.href = "?col_click=" + encodeURIComponent(value);
-                    }}
-                }}
-            }}
-
-            document.querySelectorAll(".click-zone").forEach(function(zone) {{
-                zone.addEventListener("click", function(event) {{
-                    event.preventDefault();
-                    event.stopPropagation();
-                    sendColumnClick(zone.dataset.colClick);
-                }});
-            }});
-        </script>
-    </body>
-    </html>
-    """
-
-    components.html(component_html, height=735, scrolling=False)
 
     if caption:
         st.markdown(f'<div class="xlsx-frame-note">{caption}</div>', unsafe_allow_html=True)
+
+    return click_result
 
 def toggle_column(columns, clicked_x, tolerance=10):
     columns = list(columns)
@@ -742,35 +808,6 @@ with left_col:
 
         current_columns = st.session_state.columns.get(page_num, [])
 
-        # Handle ruler clicks from inside the independent PDF scroll window.
-        # The ruler is rendered in an iframe, so clicks are sent to the parent
-        # Streamlit app as ?col_click=<page>_<x>. The uploaded PDF bytes are
-        # retained in session_state above so this rerun does not lose the PDF.
-        query_params = st.query_params
-        col_click = query_params.get("col_click")
-
-        if isinstance(col_click, list):
-            col_click = col_click[0] if col_click else None
-
-        if col_click:
-            try:
-                clicked_page_str, clicked_x_str = str(col_click).split("_", 1)
-                clicked_page = int(clicked_page_str)
-                clicked_x = int(float(clicked_x_str))
-
-                if clicked_page == page_num:
-                    latest_columns = st.session_state.columns.get(page_num, [])
-                    st.session_state.columns[page_num] = toggle_column(
-                        latest_columns,
-                        clicked_x,
-                    )
-                    st.query_params.clear()
-                    st.rerun()
-                else:
-                    st.query_params.clear()
-            except Exception:
-                st.query_params.clear()
-
         current_columns = st.session_state.columns.get(page_num, [])
 
         preview = draw_column_overlay(
@@ -778,7 +815,7 @@ with left_col:
             current_columns,
         )
 
-        show_scrollable_clickable_xlsx_markup(
+        click_result = show_scrollable_clickable_xlsx_markup(
             page_num=page_num,
             preview_image=preview,
             columns=current_columns,
@@ -786,6 +823,26 @@ with left_col:
                 f"Page {page_num + 1}: click the ruler inside the PDF scroll window to add/remove multiple column boundaries. The ruler stays visible at the top and scrolls left/right with the PDF."
             ),
         )
+
+        if click_result is not None:
+            try:
+                clicked_page = int(click_result.get("page_num"))
+                clicked_x = int(float(click_result.get("x")))
+                click_nonce = str(click_result.get("nonce", ""))
+
+                if (
+                    clicked_page == page_num
+                    and st.session_state.last_ruler_click.get(page_num) != click_nonce
+                ):
+                    latest_columns = st.session_state.columns.get(page_num, [])
+                    st.session_state.columns[page_num] = toggle_column(
+                        latest_columns,
+                        clicked_x,
+                    )
+                    st.session_state.last_ruler_click[page_num] = click_nonce
+                    st.rerun()
+            except Exception as e:
+                st.warning(f"Column click could not be processed: {e}")
 
         if st.button("Generate XLSX"):
             source_doc = None
