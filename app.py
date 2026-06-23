@@ -128,6 +128,7 @@ task = st.radio(
     "Choose Function",
     ["Redact PDF", "Convert PDF to XLSX", "Convert PDF to Plain Text"],
     horizontal=True,
+    key="task_choice",
 )
 
 uploaded = st.file_uploader(
@@ -136,10 +137,14 @@ uploaded = st.file_uploader(
     key=f"pdf_upload_{st.session_state.uploader_key}",
 )
 
-if uploaded is None:
+if uploaded is not None:
+    st.session_state["pdf_bytes"] = uploaded.getvalue()
+    st.session_state["pdf_name"] = uploaded.name
+
+if uploaded is None and "pdf_bytes" not in st.session_state:
     st.stop()
 
-pdf_bytes = uploaded.getvalue()
+pdf_bytes = st.session_state["pdf_bytes"]
 
 # Open the document only long enough to validate it, get page count, and render the selected page.
 try:
@@ -311,7 +316,7 @@ def make_clickable_ruler_html(page_num, width, height, columns):
     # Five-pixel click zones allow multiple column demarcations to be set/removed.
     for x in range(0, width, 5):
         click_zones.append(
-            f'<a class="click-zone" href="?col_click={page_num}_{x}" target="_self" '
+            f'<a class="click-zone" href="?col_click={page_num}_{x}" target="_parent" '
             f'title="Set/remove column at {x}" style="left:{x}px;"></a>'
         )
 
@@ -713,10 +718,14 @@ with left_col:
         current_columns = st.session_state.columns.get(page_num, [])
 
         # Handle ruler clicks from inside the independent PDF scroll window.
-        # Query params are cleared immediately after processing so the same marker
-        # can be clicked again later to remove it.
+        # The ruler is rendered in an iframe, so clicks are sent to the parent
+        # Streamlit app as ?col_click=<page>_<x>. The uploaded PDF bytes are
+        # retained in session_state above so this rerun does not lose the PDF.
         query_params = st.query_params
         col_click = query_params.get("col_click")
+
+        if isinstance(col_click, list):
+            col_click = col_click[0] if col_click else None
 
         if col_click:
             try:
@@ -725,12 +734,15 @@ with left_col:
                 clicked_x = int(float(clicked_x_str))
 
                 if clicked_page == page_num:
+                    latest_columns = st.session_state.columns.get(page_num, [])
                     st.session_state.columns[page_num] = toggle_column(
-                        current_columns,
+                        latest_columns,
                         clicked_x,
                     )
                     st.query_params.clear()
                     st.rerun()
+                else:
+                    st.query_params.clear()
             except Exception:
                 st.query_params.clear()
 
