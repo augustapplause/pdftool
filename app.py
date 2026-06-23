@@ -7,6 +7,7 @@ from io import BytesIO
 import fitz
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image, ImageDraw
 from streamlit_image_coordinates import streamlit_image_coordinates
 
@@ -68,40 +69,12 @@ div[data-testid="stAlert"] {
     max-width: none !important;
 }
 
-/* XLSX column-markup scroll area.
-   The ruler and PDF preview live in one independent scroll window.
-   The ruler is sticky at the top of that window during vertical scroll,
-   and it scrolls horizontally with the PDF so all markers stay aligned. */
-.xlsx-scroll-window {
-    width: 100%;
-    max-width: 100%;
-    height: 720px;
-    overflow: auto;
-    border: 1px solid #cccccc;
-    background: #ffffff;
-    padding: 0;
-    margin: 0;
-}
-
-.xlsx-scroll-content {
-    position: relative;
-    display: block;
-    max-width: none !important;
-    background: #ffffff;
-}
-
-.xlsx-sticky-ruler {
-    position: -webkit-sticky;
-    position: sticky;
-    top: 0;
-    z-index: 1000;
-    background: #ffffff;
-    border-bottom: 1px solid #777777;
-}
-
-.xlsx-scroll-content img {
-    display: block;
-    max-width: none !important;
+/* XLSX markup is rendered inside a Streamlit components iframe.
+   The iframe itself is the independent PDF scroll window. */
+.xlsx-frame-note {
+    font-size: 0.9rem;
+    color: #555555;
+    margin-top: 0.35rem;
 }
 
 </style>
@@ -327,34 +300,32 @@ def make_clickable_ruler_html(page_num, width, height, columns):
     for x in range(0, width, 10):
         tick_height = 25 if x % 50 == 0 else 10
         ticks.append(
-            f'<div style="position:absolute;left:{x}px;top:0;width:1px;height:{tick_height}px;background:#000;"></div>'
+            f'<div class="tick" style="left:{x}px;height:{tick_height}px;"></div>'
         )
 
         if x % 50 == 0:
             labels.append(
-                f'<div style="position:absolute;left:{x + 3}px;top:30px;font-size:14px;color:#000;">{x}</div>'
+                f'<div class="label" style="left:{x + 3}px;">{x}</div>'
             )
 
-    # Five-pixel click zones allow accurate multiple column placement/removal.
-    # The links update Streamlit query params, which are handled below.
+    # Five-pixel click zones allow multiple column demarcations to be set/removed.
     for x in range(0, width, 5):
         click_zones.append(
-            f'<a href="?col_click={page_num}_{x}" '
-            f'title="Set/remove column at {x}" '
-            f'style="position:absolute;left:{x}px;top:0;width:5px;height:{height}px;display:block;text-decoration:none;z-index:2000;"></a>'
+            f'<a class="click-zone" href="?col_click={page_num}_{x}" target="_self" '
+            f'title="Set/remove column at {x}" style="left:{x}px;"></a>'
         )
 
     for x in sorted([int(v) for v in columns]):
         markers.append(
-            f'<div style="position:absolute;left:{x}px;top:0;width:4px;height:{height}px;background:#0000ff;z-index:1500;"></div>'
+            f'<div class="marker-line" style="left:{x}px;"></div>'
         )
         markers.append(
-            f'<div style="position:absolute;left:{x - 6}px;top:{height - 18}px;width:12px;height:12px;border-radius:50%;background:#0000ff;z-index:1501;"></div>'
+            f'<div class="marker-dot" style="left:{x - 6}px;"></div>'
         )
 
     return f"""
-    <div class="xlsx-sticky-ruler" style="width:{width}px;height:{height}px;">
-        <div style="position:absolute;left:0;top:0;width:{width - 1}px;height:{height - 1}px;border:1px solid #505050;"></div>
+    <div id="ruler">
+        <div id="ruler-border"></div>
         {''.join(ticks)}
         {''.join(labels)}
         {''.join(markers)}
@@ -366,9 +337,8 @@ def make_clickable_ruler_html(page_num, width, height, columns):
 def show_scrollable_clickable_xlsx_markup(page_num, preview_image, columns, ruler_height=70, caption=None):
     """Render ruler and PDF in one independent scroll window.
 
-    The ruler is inside the PDF scroll window, remains visible at the top
-    during vertical scrolling, scrolls left/right with the PDF, and accepts
-    multiple add/remove column clicks.
+    The ruler stays visible at the top of the PDF window while vertically
+    scrolling and stays horizontally aligned with all PDF column lines.
     """
     preview_b64 = image_to_base64_png(preview_image)
     content_width = preview_image.width
@@ -381,25 +351,135 @@ def show_scrollable_clickable_xlsx_markup(page_num, preview_image, columns, rule
         columns=columns,
     )
 
-    st.markdown(
-        f"""
-        <div class="xlsx-scroll-window">
-            <div class="xlsx-scroll-content" style="width:{content_width}px;min-height:{content_height}px;">
+    component_html = f"""
+    <!doctype html>
+    <html>
+    <head>
+    <style>
+        html, body {{
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #ffffff;
+            font-family: sans-serif;
+        }}
+
+        #scroll-window {{
+            width: 100%;
+            height: 720px;
+            overflow: auto;
+            border: 1px solid #cccccc;
+            background: #ffffff;
+            box-sizing: border-box;
+        }}
+
+        #content {{
+            width: {content_width}px;
+            min-height: {content_height}px;
+            position: relative;
+            background: #ffffff;
+        }}
+
+        #ruler {{
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            width: {content_width}px;
+            height: {ruler_height}px;
+            background: #ffffff;
+            border-bottom: 1px solid #777777;
+            box-sizing: border-box;
+        }}
+
+        #ruler-border {{
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: {content_width - 1}px;
+            height: {ruler_height - 1}px;
+            border: 1px solid #505050;
+            box-sizing: border-box;
+            pointer-events: none;
+        }}
+
+        .tick {{
+            position: absolute;
+            top: 0;
+            width: 1px;
+            background: #000000;
+            pointer-events: none;
+        }}
+
+        .label {{
+            position: absolute;
+            top: 30px;
+            font-size: 14px;
+            color: #000000;
+            pointer-events: none;
+        }}
+
+        .marker-line {{
+            position: absolute;
+            top: 0;
+            width: 4px;
+            height: {ruler_height}px;
+            background: #0000ff;
+            z-index: 1500;
+            pointer-events: none;
+        }}
+
+        .marker-dot {{
+            position: absolute;
+            top: {ruler_height - 18}px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #0000ff;
+            z-index: 1501;
+            pointer-events: none;
+        }}
+
+        .click-zone {{
+            position: absolute;
+            top: 0;
+            width: 5px;
+            height: {ruler_height}px;
+            display: block;
+            text-decoration: none;
+            z-index: 2000;
+        }}
+
+        .click-zone:hover {{
+            background: rgba(0, 0, 255, 0.10);
+        }}
+
+        img {{
+            display: block;
+            max-width: none;
+        }}
+    </style>
+    </head>
+    <body>
+        <div id="scroll-window">
+            <div id="content">
                 {ruler_html}
                 <img
                     src="data:image/png;base64,{preview_b64}"
                     width="{preview_image.width}"
                     height="{preview_image.height}"
-                    style="display:block;max-width:none;"
                 >
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    </body>
+    </html>
+    """
+
+    components.html(component_html, height=735, scrolling=False)
 
     if caption:
-        st.caption(caption)
+        st.markdown(f'<div class="xlsx-frame-note">{caption}</div>', unsafe_allow_html=True)
 
 def toggle_column(columns, clicked_x, tolerance=10):
     columns = list(columns)
