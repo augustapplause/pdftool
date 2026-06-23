@@ -251,6 +251,22 @@ def draw_column_overlay(image, columns):
     return preview
 
 
+def combine_ruler_and_preview(ruler_image, preview_image):
+    """Create one clickable image containing the ruler and PDF preview.
+
+    This avoids duplicate rulers and keeps ruler marks and PDF column lines
+    perfectly aligned because they are rendered in the same image.
+    """
+    width = max(ruler_image.width, preview_image.width)
+    height = ruler_image.height + preview_image.height
+
+    combined = Image.new("RGB", (width, height), "white")
+    combined.paste(ruler_image, (0, 0))
+    combined.paste(preview_image, (0, ruler_image.height))
+
+    return combined
+
+
 def draw_redaction_overlay(image, rects, first_corner=None):
     preview = image.copy()
     draw = ImageDraw.Draw(preview)
@@ -541,42 +557,51 @@ with left_col:
 
         current_columns = st.session_state.columns.get(page_num, [])
 
+        ruler_height = 70
+
         ruler = make_ruler(
             width=page_image.width,
+            height=ruler_height,
             columns=current_columns,
         )
 
-        # Fixed natural width keeps click coordinates aligned with the rendered page preview.
-        click = streamlit_image_coordinates(
+        preview = draw_column_overlay(
+            page_image,
+            current_columns,
+        )
+
+        combined_markup = combine_ruler_and_preview(
             ruler,
+            preview,
+        )
+
+        click = streamlit_image_coordinates(
+            combined_markup,
             width=page_image.width,
-            key=f"ruler_page_{page_num}",
+            key=f"xlsx_combined_markup_page_{page_num}",
         )
 
         if click is not None:
             clicked_x = int(click["x"])
             clicked_y = int(click["y"])
-            click_signature = f"{clicked_x}_{clicked_y}"
 
-            previous_click = st.session_state.last_ruler_click.get(page_num)
+            # Only ruler clicks add/remove column points. Clicks on the PDF preview are ignored.
+            if clicked_y <= ruler_height:
+                click_signature = f"{clicked_x}_{clicked_y}"
 
-            if previous_click != click_signature:
-                st.session_state.last_ruler_click[page_num] = click_signature
-                st.session_state.columns[page_num] = toggle_column(
-                    current_columns,
-                    clicked_x,
-                )
-                st.rerun()
+                previous_click = st.session_state.last_ruler_click.get(page_num)
 
-        preview = draw_column_overlay(
-            page_image,
-            st.session_state.columns.get(page_num, []),
-        )
+                if previous_click != click_signature:
+                    st.session_state.last_ruler_click[page_num] = click_signature
+                    st.session_state.columns[page_num] = toggle_column(
+                        current_columns,
+                        clicked_x,
+                    )
+                    st.rerun()
 
-        show_scrollable_xlsx_markup(
-            ruler,
-            preview,
-            caption=f"Page {page_num + 1} with selected column boundaries. Ruler and PDF now scroll together to keep markings aligned.",
+        st.caption(
+            f"Page {page_num + 1}: click the ruler to add/remove column boundaries. "
+            "The ruler and PDF are rendered as one aligned image."
         )
 
         if st.button("Generate XLSX"):
