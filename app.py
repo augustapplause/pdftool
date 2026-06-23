@@ -573,9 +573,10 @@ with left_col:
             st.session_state.columns.get(page_num, []),
         )
 
-        show_scrollable_image(
+        show_scrollable_xlsx_markup(
+            ruler,
             preview,
-            caption=f"Page {page_num + 1} with selected column boundaries. The ruler stays visible above while this page window scrolls.",
+            caption=f"Page {page_num + 1} with selected column boundaries. Ruler and PDF now scroll together to keep markings aligned.",
         )
 
         if st.button("Generate XLSX"):
