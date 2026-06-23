@@ -1,4 +1,6 @@
+import base64
 import gc
+import re
 from io import BytesIO
 
 import fitz
@@ -47,6 +49,22 @@ div[data-testid="stFileUploader"] button {
 /* Success messages */
 div[data-testid="stAlert"] {
     font-size: 1.3rem !important;
+}
+
+/* Stable XLSX preview rendering */
+.xlsx-scroll-window {
+    width: 100%;
+    max-width: 100%;
+    height: 650px;
+    overflow: auto;
+    border: 1px solid #cccccc;
+    padding: 0;
+    background: #ffffff;
+}
+
+.xlsx-scroll-window img {
+    display: block;
+    max-width: none !important;
 }
 
 </style>
@@ -98,7 +116,7 @@ with st.sidebar:
 
 task = st.radio(
     "Choose Function",
-    ["Redact PDF", "Convert PDF to XLSX"],
+    ["Redact PDF", "Convert PDF to XLSX", "Convert PDF to Plain Text"],
     horizontal=True,
 )
 
@@ -213,8 +231,8 @@ def make_ruler(width, height=70, columns=None):
             draw.text((x + 3, 30), str(x), fill=(0, 0, 0))
 
     for x in columns:
-        draw.line([(x, 0), (x, height)], fill=(0, 0, 255), width=4)
-        draw.ellipse([(x - 6, height - 18), (x + 6, height - 6)], fill=(0, 0, 255))
+        draw.line([(int(x), 0), (int(x), height)], fill=(0, 0, 255), width=4)
+        draw.ellipse([(int(x) - 6, height - 18), (int(x) + 6, height - 6)], fill=(0, 0, 255))
 
     return ruler
 
@@ -251,6 +269,33 @@ def draw_redaction_overlay(image, rects, first_corner=None):
         draw.text((x + 10, y + 10), "1st corner", fill=(255, 0, 0))
 
     return preview
+
+
+def image_to_base64_png(image):
+    buffer = BytesIO()
+    try:
+        image.save(buffer, format="PNG")
+        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+    finally:
+        buffer.close()
+
+
+def show_scrollable_image(image, caption=None):
+    """Render an image at its natural pixel width inside its own scrollable window."""
+    image_b64 = image_to_base64_png(image)
+    caption_html = ""
+    if caption:
+        caption_html = f'<div style="font-size:0.9rem; color:#555; margin-top:0.35rem;">{caption}</div>'
+
+    st.markdown(
+        f"""
+        <div class="xlsx-scroll-window">
+            <img src="data:image/png;base64,{image_b64}" width="{image.width}" height="{image.height}">
+        </div>
+        {caption_html}
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def toggle_column(columns, clicked_x, tolerance=10):
@@ -331,6 +376,107 @@ def assign_word_to_column(word, boundaries):
     return None
 
 
+def clean_numeric_string(value):
+    """Convert numeric-looking strings to int/float while leaving normal text unchanged."""
+    if value is None:
+        return value
+
+    if isinstance(value, (int, float)):
+        return value
+
+    text = str(value).strip()
+
+    if text == "":
+        return value
+
+    # Keep obvious text, dates, phone numbers, ranges, and IDs as text.
+    if re.search(r"[A-Za-z]", text):
+        return value
+
+    if re.search(r"\d{1,4}[-/]\d{1,2}[-/]\d{1,4}", text):
+        return value
+
+    if re.search(r"\d+\s*-\s*\d+", text):
+        return value
+
+    cleaned = text
+    negative = False
+
+    # Accounting negative format: ($1,234.56)
+    if cleaned.startswith("(") and cleaned.endswith(")"):
+        negative = True
+        cleaned = cleaned[1:-1].strip()
+
+    cleaned = cleaned.replace(",", "")
+    cleaned = cleaned.replace("$", "")
+    cleaned = cleaned.replace("€", "")
+    cleaned = cleaned.replace("£", "")
+    cleaned = cleaned.replace("¥", "")
+    cleaned = cleaned.strip()
+
+    is_percent = False
+    if cleaned.endswith("%"):
+        is_percent = True
+        cleaned = cleaned[:-1].strip()
+
+    if cleaned.startswith("-"):
+        negative = True
+        cleaned = cleaned[1:].strip()
+
+    if not re.fullmatch(r"\d+(\.\d+)?|\.\d+", cleaned):
+        return value
+
+    try:
+        number = float(cleaned)
+
+        if negative:
+            number = -number
+
+        if is_percent:
+            number = number / 100
+
+        if number.is_integer() and not is_percent and "." not in cleaned:
+            return int(number)
+
+        return number
+
+    except Exception:
+        return value
+
+
+def convert_numeric_cells(df):
+    """Apply numeric conversion cell-by-cell without forcing entire columns to one type."""
+    return df.applymap(clean_numeric_string)
+
+
+# ============================================================
+# Plain text extraction helper
+# ============================================================
+
+
+def extract_plain_text_from_pdf(pdf_bytes):
+    text_doc = None
+
+    try:
+        text_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        parts = []
+
+        for pnum in range(len(text_doc)):
+            page = text_doc[pnum]
+            page_text = page.get_text("text").strip()
+
+            parts.append(f"===== Page {pnum + 1} =====")
+            parts.append(page_text)
+            parts.append("")
+
+        return "\n".join(parts).encode("utf-8")
+
+    finally:
+        if text_doc is not None:
+            text_doc.close()
+        gc.collect()
+
+
 # ============================================================
 # Main app layout
 # ============================================================
@@ -354,7 +500,7 @@ with right_col:
         st.write("Saved column points:")
         st.write(st.session_state.columns.get(page_num, []))
 
-    else:
+    elif task == "Redact PDF":
         st.info("Click two opposite corners to create each redaction rectangle.")
         st.write("Saved redaction rectangles:")
         st.write(len(st.session_state.redactions.get(page_num, [])))
@@ -373,6 +519,9 @@ with right_col:
             gc.collect()
             st.rerun()
 
+    else:
+        st.info("Extract all selectable text from the PDF and download it as a .txt file.")
+
 
 with left_col:
     if task == "Convert PDF to XLSX":
@@ -385,8 +534,10 @@ with left_col:
             columns=current_columns,
         )
 
+        # Fixed natural width keeps click coordinates aligned with the rendered page preview.
         click = streamlit_image_coordinates(
             ruler,
+            width=page_image.width,
             key=f"ruler_page_{page_num}",
         )
 
@@ -410,10 +561,9 @@ with left_col:
             st.session_state.columns.get(page_num, []),
         )
 
-        st.image(
+        show_scrollable_image(
             preview,
-            caption=f"Page {page_num + 1} with selected column boundaries",
-            use_column_width=False,
+            caption=f"Page {page_num + 1} with selected column boundaries. The ruler stays visible above while this page window scrolls.",
         )
 
         if st.button("Generate XLSX"):
@@ -457,6 +607,7 @@ with left_col:
 
                         if table_rows:
                             df = pd.DataFrame(table_rows)
+                            df = convert_numeric_cells(df)
 
                             df.to_excel(
                                 writer,
@@ -495,7 +646,7 @@ with left_col:
 
             st.caption("After downloading, use 'Clear uploaded PDF and reset app' in the sidebar.")
 
-    else:
+    elif task == "Redact PDF":
         st.subheader("Redaction Markup")
 
         preview = draw_redaction_overlay(
@@ -506,6 +657,7 @@ with left_col:
 
         click = streamlit_image_coordinates(
             preview,
+            width=page_image.width,
             key=f"redaction_page_{page_num}",
         )
 
@@ -559,6 +711,32 @@ with left_col:
                 data=output_bytes,
                 file_name="redacted.pdf",
                 mime="application/pdf",
+            )
+
+            st.caption("After downloading, use 'Clear uploaded PDF and reset app' in the sidebar.")
+
+    else:
+        st.subheader("Convert Whole PDF to Plain Text")
+
+        st.write(
+            "This extracts selectable text from every page and saves it as a plain `.txt` file. "
+            "Scanned image-only PDFs may produce little or no text unless OCR is added later."
+        )
+
+        st.image(
+            page_image,
+            caption=f"Page {page_num + 1} preview",
+            use_column_width=False,
+        )
+
+        if st.button("Generate Plain Text File"):
+            output_text_bytes = extract_plain_text_from_pdf(pdf_bytes)
+
+            st.download_button(
+                label="Download Plain Text File",
+                data=output_text_bytes,
+                file_name="extracted_text.txt",
+                mime="text/plain",
             )
 
             st.caption("After downloading, use 'Clear uploaded PDF and reset app' in the sidebar.")
