@@ -280,9 +280,16 @@ def image_to_base64_png(image):
         buffer.close()
 
 
-def show_scrollable_image(image, caption=None):
-    """Render an image at its natural pixel width inside its own scrollable window."""
-    image_b64 = image_to_base64_png(image)
+def show_scrollable_xlsx_markup(ruler_image, preview_image, caption=None):
+    """Render the ruler and PDF preview in one shared scrollable window.
+
+    The ruler is sticky at the top and scrolls horizontally with the PDF image,
+    keeping column demarcation marks aligned with the PDF below.
+    """
+    ruler_b64 = image_to_base64_png(ruler_image)
+    preview_b64 = image_to_base64_png(preview_image)
+    content_width = max(ruler_image.width, preview_image.width)
+
     caption_html = ""
     if caption:
         caption_html = f'<div style="font-size:0.9rem; color:#555; margin-top:0.35rem;">{caption}</div>'
@@ -290,7 +297,12 @@ def show_scrollable_image(image, caption=None):
     st.markdown(
         f"""
         <div class="xlsx-scroll-window">
-            <img src="data:image/png;base64,{image_b64}" width="{image.width}" height="{image.height}">
+            <div class="xlsx-scroll-content" style="width:{content_width}px;">
+                <div class="xlsx-sticky-ruler">
+                    <img src="data:image/png;base64,{ruler_b64}" width="{ruler_image.width}" height="{ruler_image.height}">
+                </div>
+                <img src="data:image/png;base64,{preview_b64}" width="{preview_image.width}" height="{preview_image.height}">
+            </div>
         </div>
         {caption_html}
         """,
