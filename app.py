@@ -69,14 +69,39 @@ div[data-testid="stAlert"] {
 }
 
 /* XLSX column-markup scroll area.
-   The ruler and PDF preview are inside one independent iframe scroll window.
-   The ruler stays sticky at the top of that window and scrolls horizontally
-   with the PDF image. */
-.xlsx-frame {
+   The ruler and PDF preview live in one independent scroll window.
+   The ruler is sticky at the top of that window during vertical scroll,
+   and it scrolls horizontally with the PDF so all markers stay aligned. */
+.xlsx-scroll-window {
     width: 100%;
+    max-width: 100%;
     height: 720px;
+    overflow: auto;
     border: 1px solid #cccccc;
     background: #ffffff;
+    padding: 0;
+    margin: 0;
+}
+
+.xlsx-scroll-content {
+    position: relative;
+    display: block;
+    max-width: none !important;
+    background: #ffffff;
+}
+
+.xlsx-sticky-ruler {
+    position: -webkit-sticky;
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    background: #ffffff;
+    border-bottom: 1px solid #777777;
+}
+
+.xlsx-scroll-content img {
+    display: block;
+    max-width: none !important;
 }
 
 </style>
@@ -293,7 +318,7 @@ def image_to_base64_png(image):
 
 
 def make_clickable_ruler_html(page_num, width, height, columns):
-    """Build a sticky clickable ruler for the PDF scroll iframe."""
+    """Build a sticky clickable ruler inside the PDF scroll window."""
     ticks = []
     labels = []
     markers = []
@@ -310,24 +335,25 @@ def make_clickable_ruler_html(page_num, width, height, columns):
                 f'<div style="position:absolute;left:{x + 3}px;top:30px;font-size:14px;color:#000;">{x}</div>'
             )
 
-    # Five-pixel click zones allow column placement/removal directly from the ruler.
+    # Five-pixel click zones allow accurate multiple column placement/removal.
+    # The links update Streamlit query params, which are handled below.
     for x in range(0, width, 5):
         click_zones.append(
-            f'<a href="?col_click={page_num}_{x}" target="_parent" '
+            f'<a href="?col_click={page_num}_{x}" '
             f'title="Set/remove column at {x}" '
-            f'style="position:absolute;left:{x}px;top:0;width:5px;height:{height}px;display:block;text-decoration:none;z-index:30;"></a>'
+            f'style="position:absolute;left:{x}px;top:0;width:5px;height:{height}px;display:block;text-decoration:none;z-index:2000;"></a>'
         )
 
     for x in sorted([int(v) for v in columns]):
         markers.append(
-            f'<div style="position:absolute;left:{x}px;top:0;width:4px;height:{height}px;background:#0000ff;z-index:20;"></div>'
+            f'<div style="position:absolute;left:{x}px;top:0;width:4px;height:{height}px;background:#0000ff;z-index:1500;"></div>'
         )
         markers.append(
-            f'<div style="position:absolute;left:{x - 6}px;top:{height - 18}px;width:12px;height:12px;border-radius:50%;background:#0000ff;z-index:21;"></div>'
+            f'<div style="position:absolute;left:{x - 6}px;top:{height - 18}px;width:12px;height:12px;border-radius:50%;background:#0000ff;z-index:1501;"></div>'
         )
 
     return f"""
-    <div id="ruler" style="position:sticky;top:0;z-index:50;width:{width}px;height:{height}px;background:#fff;border-bottom:1px solid #777;">
+    <div class="xlsx-sticky-ruler" style="width:{width}px;height:{height}px;">
         <div style="position:absolute;left:0;top:0;width:{width - 1}px;height:{height - 1}px;border:1px solid #505050;"></div>
         {''.join(ticks)}
         {''.join(labels)}
@@ -340,8 +366,9 @@ def make_clickable_ruler_html(page_num, width, height, columns):
 def show_scrollable_clickable_xlsx_markup(page_num, preview_image, columns, ruler_height=70, caption=None):
     """Render ruler and PDF in one independent scroll window.
 
-    The ruler is inside the PDF scroll window, stays fixed at the top during
-    vertical scrolling, scrolls left/right with the PDF, and is clickable.
+    The ruler is inside the PDF scroll window, remains visible at the top
+    during vertical scrolling, scrolls left/right with the PDF, and accepts
+    multiple add/remove column clicks.
     """
     preview_b64 = image_to_base64_png(preview_image)
     content_width = preview_image.width
@@ -354,55 +381,19 @@ def show_scrollable_clickable_xlsx_markup(page_num, preview_image, columns, rule
         columns=columns,
     )
 
-    frame_html = f"""
-    <!doctype html>
-    <html>
-    <head>
-    <style>
-        html, body {{
-            margin: 0;
-            padding: 0;
-            background: #ffffff;
-            overflow: auto;
-            font-family: sans-serif;
-        }}
-        #content {{
-            width: {content_width}px;
-            min-height: {content_height}px;
-            position: relative;
-            background: #ffffff;
-        }}
-        img {{
-            display: block;
-            max-width: none;
-        }}
-        a:hover {{
-            background: rgba(0, 0, 255, 0.08);
-        }}
-    </style>
-    </head>
-    <body>
-        <div id="content">
-            {ruler_html}
-            <img
-                src="data:image/png;base64,{preview_b64}"
-                width="{preview_image.width}"
-                height="{preview_image.height}"
-            >
-        </div>
-    </body>
-    </html>
-    """
-
-    frame_b64 = base64.b64encode(frame_html.encode("utf-8")).decode("utf-8")
-
     st.markdown(
         f"""
-        <iframe
-            class="xlsx-frame"
-            src="data:text/html;base64,{frame_b64}"
-            scrolling="yes">
-        </iframe>
+        <div class="xlsx-scroll-window">
+            <div class="xlsx-scroll-content" style="width:{content_width}px;min-height:{content_height}px;">
+                {ruler_html}
+                <img
+                    src="data:image/png;base64,{preview_b64}"
+                    width="{preview_image.width}"
+                    height="{preview_image.height}"
+                    style="display:block;max-width:none;"
+                >
+            </div>
+        </div>
         """,
         unsafe_allow_html=True,
     )
@@ -641,7 +632,9 @@ with left_col:
 
         current_columns = st.session_state.columns.get(page_num, [])
 
-        # Handle ruler clicks coming back from the independent PDF scroll window.
+        # Handle ruler clicks from inside the independent PDF scroll window.
+        # Query params are cleared immediately after processing so the same marker
+        # can be clicked again later to remove it.
         query_params = st.query_params
         col_click = query_params.get("col_click")
 
@@ -652,16 +645,12 @@ with left_col:
                 clicked_x = int(float(clicked_x_str))
 
                 if clicked_page == page_num:
-                    previous_click = st.session_state.last_ruler_click.get(page_num)
-
-                    if previous_click != str(col_click):
-                        st.session_state.last_ruler_click[page_num] = str(col_click)
-                        st.session_state.columns[page_num] = toggle_column(
-                            current_columns,
-                            clicked_x,
-                        )
-                        st.query_params.clear()
-                        st.rerun()
+                    st.session_state.columns[page_num] = toggle_column(
+                        current_columns,
+                        clicked_x,
+                    )
+                    st.query_params.clear()
+                    st.rerun()
             except Exception:
                 st.query_params.clear()
 
@@ -677,9 +666,7 @@ with left_col:
             preview_image=preview,
             columns=current_columns,
             caption=(
-                f"Page {page_num + 1}: click the ruler inside the PDF scroll window "
-                "to add/remove column boundaries. The ruler stays fixed at the top "
-                "and scrolls left/right with the PDF."
+                f"Page {page_num + 1}: click the ruler inside the PDF scroll window to add/remove multiple column boundaries. The ruler stays visible at the top and scrolls left/right with the PDF."
             ),
         )
 
