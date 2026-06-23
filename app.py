@@ -314,10 +314,12 @@ def make_clickable_ruler_html(page_num, width, height, columns):
             )
 
     # Five-pixel click zones allow multiple column demarcations to be set/removed.
+    # These are divs instead of links. JavaScript below sends the click to the
+    # parent Streamlit page as ?col_click=<page>_<x>.
     for x in range(0, width, 5):
         click_zones.append(
-            f'<a class="click-zone" href="?col_click={page_num}_{x}" target="_parent" '
-            f'title="Set/remove column at {x}" style="left:{x}px;"></a>'
+            f'<div class="click-zone" data-col-click="{page_num}_{x}" '
+            f'title="Set/remove column at {x}" style="left:{x}px;"></div>'
         )
 
     for x in sorted([int(v) for v in columns]):
@@ -452,7 +454,7 @@ def show_scrollable_clickable_xlsx_markup(page_num, preview_image, columns, rule
             width: 5px;
             height: {ruler_height}px;
             display: block;
-            text-decoration: none;
+            cursor: pointer;
             z-index: 2000;
         }}
 
@@ -477,6 +479,29 @@ def show_scrollable_clickable_xlsx_markup(page_num, preview_image, columns, rule
                 >
             </div>
         </div>
+        <script>
+            function sendColumnClick(value) {{
+                try {{
+                    const parentUrl = new URL(window.parent.location.href);
+                    parentUrl.searchParams.set("col_click", value);
+                    window.parent.location.href = parentUrl.toString();
+                }} catch (err) {{
+                    try {{
+                        window.top.location.href = "?col_click=" + encodeURIComponent(value);
+                    }} catch (err2) {{
+                        window.location.href = "?col_click=" + encodeURIComponent(value);
+                    }}
+                }}
+            }}
+
+            document.querySelectorAll(".click-zone").forEach(function(zone) {{
+                zone.addEventListener("click", function(event) {{
+                    event.preventDefault();
+                    event.stopPropagation();
+                    sendColumnClick(zone.dataset.colClick);
+                }});
+            }});
+        </script>
     </body>
     </html>
     """
