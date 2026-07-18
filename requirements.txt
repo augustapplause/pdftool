@@ -1,0 +1,7 @@
+streamlit
+streamlit-image-coordinates
+PyMuPDF
+pandas
+openpyxl
+Pillow
+pytesseract
