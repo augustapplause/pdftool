@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { makeToolShell, makeWorkspace, button, status, toast, createDownload } from './ui.js';
 import { renderPage } from './pdf.js';
-import { toggleColumn, generateWorkbook } from './xlsx.js';
+import { toggleColumn, generateWorkbook, createOcrDiagnosticsZip } from './xlsx.js';
 
 export async function renderXlsx() {
   makeToolShell('xlsx');
@@ -70,13 +70,27 @@ export async function renderXlsx() {
   const points = document.createElement('div'); points.className = 'page-status'; right.append(points);
   const updateList = () => { points.textContent = `Saved column points: ${columns.get(page).join(', ') || 'None'}`; for (let p = 0; p < docRows.length; p++) { const n = (columns.get(p) || []).length; docRows[p].textContent = `Page ${p + 1}: ${n} column marker${n === 1 ? '' : 's'}`; } };
   right.append(status('Click the ruler to add/remove column boundaries. Drag blue lines to reposition them.'));
+  const diagnosticsLabel = document.createElement('label');
+  diagnosticsLabel.className = 'diagnostic-option';
+  const diagnosticsCheckbox = document.createElement('input');
+  diagnosticsCheckbox.type = 'checkbox';
+  diagnosticsCheckbox.checked = false;
+  const diagnosticsText = document.createElement('span');
+  diagnosticsText.textContent = 'Capture OCR diagnostic images (slower; optional)';
+  diagnosticsLabel.append(diagnosticsCheckbox, diagnosticsText);
+  right.append(diagnosticsLabel);
   right.append(button('Clear Current Page', () => { columns.set(page, []); redrawLines(); updateList(); }));
   right.append(button('Generate XLSX', async () => {
     if (![...columns.values()].some((v) => v.length)) { toast('Mark at least one column boundary before generating the XLSX.'); return; }
     try {
       const progress = status('Starting extraction...'); right.append(progress);
-      const output = await generateWorkbook(state.pdf, columns, (message) => { progress.textContent = message; });
+      const output = await generateWorkbook(state.pdf, columns, (message) => { progress.textContent = message; }, { captureDiagnostics: diagnosticsCheckbox.checked });
       createDownload(output.bytes, 'extracted.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      if (diagnosticsCheckbox.checked && output.diagnostics?.length) {
+        progress.textContent = 'Packaging OCR diagnostic images and raw recognition data...';
+        const diagnosticZip = await createOcrDiagnosticsZip(output.diagnostics);
+        createDownload(diagnosticZip, 'ocr-diagnostics.zip', 'application/zip');
+      }
       const details = [];
       if (output.usedOcrPages.length) details.push(`Tesseract.js was used on page(s): ${output.usedOcrPages.join(', ')}.`);
       else details.push('The XLSX was generated from the PDF text layer; OCR was not needed.');
@@ -84,6 +98,7 @@ export async function renderXlsx() {
       if (output.numericRechecked) details.push(`Image-based OCR rechecks updated ${output.numericRechecked} cell(s).`);
       if (output.reviewCount) details.push(`OCR Review worksheet flags ${output.reviewCount} cell(s) for inspection.`);
       if (output.arithmeticWarnings) details.push(`Arithmetic diagnostics flagged ${output.arithmeticWarnings} possible inconsistency/ies. No values were changed by these checks.`);
+      if (diagnosticsCheckbox.checked) details.push('An OCR diagnostics ZIP was downloaded with the exact source crops, Tesseract input images and raw TSV results.');
       progress.textContent = details.join(' '); progress.className = 'status success';
       toast('XLSX generated.');
     } catch (error) { console.error(error); toast(`XLSX generation failed: ${error.message}`, 7000); }

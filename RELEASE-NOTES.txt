@@ -1,16 +1,13 @@
-PDF Tools v1.0.6
+PDF Tools v1.0.7
 
-XLSX workflow parity release.
+Image-resampling parity release.
 
-- Restored the Streamlit sequence: native text first, OCR fallback only when no native words are present.
-- First-pass OCR now uses 4.0x rendering, independently padded column crops, grayscale/full-range autocontrast, the original width-based 1.75x/1.5x enlargement, 16px border, PSM 6, and confidence >= 10.
-- Restored the original row grouping order, first-match placement and pairwise row-centre averaging.
-- Restored separate 6pt OCR and 4pt native row tolerances.
-- Second-pass recovery uses a single 5.0x page render and a shared crop cache.
-- Blank-cell recovery follows the original neighbour-support, row-population and first-column/numeric-column rules.
-- Cell OCR follows the original PSM 7/8/13 sequence, 4x enlargement, 24px border, confidence scoring, immediate-stop rules and thresholded fallback.
-- Numeric recovery uses original 5+-digit eligibility, decimal-precision inference, magnitude references and repair thresholds.
-- Numeric spacing normalization and cell-by-cell numeric conversion mirror the supplied Python implementation.
-- Arithmetic consistency checks remain warnings only and never modify extracted data.
+- Implements separable Lanczos-3 resizing instead of browser Canvas smoothing.
+- Uses Python-compatible integer truncation for target image dimensions.
+- Aligns Tesseract.js OEM selection with the original --oem 3 configuration using OEM.DEFAULT.
+- Removes forced 300 DPI, which was not present in the original Python configuration.
+- Adds optional diagnostic ZIP containing source column crops, exact OCR input images, raw TSV and timings.
+- Preserves the original Streamlit extraction and recovery sequence.
+- Arithmetic diagnostics remain warnings only; no extracted values are changed by arithmetic checks.
 
-All files remain in the GitHub repository root. Browser-side JavaScript syntax and package checks are run before delivery; full browser integration remains to be verified in the deployed site.
+All files are at the repository root. See README.md for deployment and diagnostic-mode instructions.

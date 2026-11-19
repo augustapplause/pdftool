@@ -25,8 +25,97 @@ function median(values) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
-/** Browser equivalent of the Python sequence: grayscale -> ImageOps.autocontrast -> LANCZOS resize -> white border. */
-function makeAutocontrastCanvas(source, enlargement = 1, border = 16, binary = false) {
+/** Lanczos-3 contribution table using Pillow's pixel-centre mapping. */
+function sinc(value) {
+  if (Math.abs(value) < 1e-12) return 1;
+  const p = Math.PI * value;
+  return Math.sin(p) / p;
+}
+
+function lanczosKernel(value) {
+  const absolute = Math.abs(value);
+  if (absolute >= 3) return 0;
+  return sinc(value) * sinc(value / 3);
+}
+
+function buildLanczosContributions(inputSize, outputSize) {
+  const scale = outputSize / inputSize;
+  const filterScale = Math.max(1, 1 / scale);
+  const support = 3 * filterScale;
+  const result = new Array(outputSize);
+
+  for (let out = 0; out < outputSize; out += 1) {
+    const centre = (out + 0.5) / scale;
+    const first = Math.max(0, Math.floor(centre - support + 0.5));
+    const last = Math.min(inputSize, Math.floor(centre + support + 0.5));
+    const indices = [];
+    const weights = [];
+    let total = 0;
+    for (let input = first; input < last; input += 1) {
+      const weight = lanczosKernel((input + 0.5 - centre) * filterScale);
+      if (weight === 0) continue;
+      indices.push(input);
+      weights.push(weight);
+      total += weight;
+    }
+    if (total !== 0) {
+      for (let i = 0; i < weights.length; i += 1) weights[i] /= total;
+    }
+    result[out] = { indices, weights };
+  }
+  return result;
+}
+
+/**
+ * Two-pass Lanczos-3 resizing of an already grayscale/autocontrasted canvas.
+ * The separable implementation avoids the cost of a full 2-D convolution.
+ */
+function resizeGrayLanczos(sourceImageData, outputWidth, outputHeight) {
+  const inputWidth = sourceImageData.width;
+  const inputHeight = sourceImageData.height;
+  const source = sourceImageData.data;
+  const horizontal = buildLanczosContributions(inputWidth, outputWidth);
+  const vertical = buildLanczosContributions(inputHeight, outputHeight);
+  const intermediate = new Float32Array(outputWidth * inputHeight);
+
+  // Horizontal pass.
+  for (let y = 0; y < inputHeight; y += 1) {
+    const sourceRow = y * inputWidth * 4;
+    const targetRow = y * outputWidth;
+    for (let x = 0; x < outputWidth; x += 1) {
+      const contribution = horizontal[x];
+      let value = 0;
+      for (let k = 0; k < contribution.indices.length; k += 1) {
+        value += source[sourceRow + contribution.indices[k] * 4] * contribution.weights[k];
+      }
+      intermediate[targetRow + x] = value;
+    }
+  }
+
+  // Vertical pass. Store grayscale RGBA directly into ImageData.
+  const output = new ImageData(outputWidth, outputHeight);
+  const target = output.data;
+  for (let y = 0; y < outputHeight; y += 1) {
+    const contribution = vertical[y];
+    const targetRow = y * outputWidth * 4;
+    for (let x = 0; x < outputWidth; x += 1) {
+      let value = 0;
+      for (let k = 0; k < contribution.indices.length; k += 1) {
+        value += intermediate[contribution.indices[k] * outputWidth + x] * contribution.weights[k];
+      }
+      const pixel = Math.max(0, Math.min(255, Math.floor(value + 0.5)));
+      const offset = targetRow + x * 4;
+      target[offset] = pixel;
+      target[offset + 1] = pixel;
+      target[offset + 2] = pixel;
+      target[offset + 3] = 255;
+    }
+  }
+  return output;
+}
+
+/** Browser port of Pillow grayscale -> autocontrast -> LANCZOS -> white border. */
+export function makeAutocontrastCanvas(source, enlargement = 1, border = 16, binary = false) {
   const gray = document.createElement('canvas');
   gray.width = Math.max(1, source.width);
   gray.height = Math.max(1, source.height);
@@ -35,22 +124,21 @@ function makeAutocontrastCanvas(source, enlargement = 1, border = 16, binary = f
 
   const image = grayContext.getImageData(0, 0, gray.width, gray.height);
   const pixels = image.data;
-  const histogram = new Uint32Array(256);
   let low = 255;
   let high = 0;
   for (let i = 0; i < pixels.length; i += 4) {
+    // Pillow ImageOps.grayscale uses the ITU-R 601-2 luma coefficients.
     const value = Math.max(0, Math.min(255, Math.round(
       pixels[i] * 0.299 + pixels[i + 1] * 0.587 + pixels[i + 2] * 0.114
     )));
     pixels[i] = value;
     pixels[i + 1] = value;
     pixels[i + 2] = value;
-    histogram[value] += 1;
     if (value < low) low = value;
     if (value > high) high = value;
   }
 
-  // ImageOps.autocontrast defaults to cutoff=0, so use the full observed range.
+  // Pillow ImageOps.autocontrast defaults to cutoff=0 and preserve_tone=false.
   const range = Math.max(1, high - low);
   for (let i = 0; i < pixels.length; i += 4) {
     const value = Math.max(0, Math.min(255, Math.round((pixels[i] - low) * 255 / range)));
@@ -61,20 +149,20 @@ function makeAutocontrastCanvas(source, enlargement = 1, border = 16, binary = f
   }
   grayContext.putImageData(image, 0, 0);
 
-  const scaledWidth = Math.max(1, Math.round(gray.width * enlargement));
-  const scaledHeight = Math.max(1, Math.round(gray.height * enlargement));
+  // Python uses int(width * scale), i.e. truncation rather than Math.round.
+  const scaledWidth = Math.max(1, Math.trunc(gray.width * enlargement));
+  const scaledHeight = Math.max(1, Math.trunc(gray.height * enlargement));
+  const resizedImage = resizeGrayLanczos(image, scaledWidth, scaledHeight);
   const enlarged = document.createElement('canvas');
   enlarged.width = scaledWidth;
   enlarged.height = scaledHeight;
-  const enlargedContext = enlarged.getContext('2d', { willReadFrequently: binary });
-  enlargedContext.imageSmoothingEnabled = true;
-  enlargedContext.imageSmoothingQuality = 'high';
-  enlargedContext.drawImage(gray, 0, 0, scaledWidth, scaledHeight);
+  enlarged.getContext('2d', { willReadFrequently: binary }).putImageData(resizedImage, 0, 0);
   gray.width = 1;
   gray.height = 1;
 
   if (binary) {
-    const enlargedImage = enlargedContext.getImageData(0, 0, scaledWidth, scaledHeight);
+    const context = enlarged.getContext('2d', { willReadFrequently: true });
+    const enlargedImage = context.getImageData(0, 0, scaledWidth, scaledHeight);
     const enlargedPixels = enlargedImage.data;
     for (let i = 0; i < enlargedPixels.length; i += 4) {
       const value = enlargedPixels[i] > 175 ? 255 : 0;
@@ -83,7 +171,7 @@ function makeAutocontrastCanvas(source, enlargement = 1, border = 16, binary = f
       enlargedPixels[i + 2] = value;
       enlargedPixels[i + 3] = 255;
     }
-    enlargedContext.putImageData(enlargedImage, 0, 0);
+    context.putImageData(enlargedImage, 0, 0);
   }
 
   const output = document.createElement('canvas');
@@ -96,6 +184,12 @@ function makeAutocontrastCanvas(source, enlargement = 1, border = 16, binary = f
   enlarged.width = 1;
   enlarged.height = 1;
   return { canvas: output, enlargement, border };
+}
+
+function canvasToBlob(canvas, type = 'image/png') {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('Could not capture OCR diagnostic image.')), type);
+  });
 }
 
 function makeColumnCrop(pageCanvas, pixelLeft, pixelRight) {
@@ -625,7 +719,7 @@ function buildReviewSheet(XLSX, reviewRows, arithmeticWarnings) {
 }
 
 /** Column-by-column, padded OCR fallback. Mirrors extract_ocr_words_by_columns. */
-async function extractOcrWordsByColumns(pdf, pageIndex, boundaries, pageWidth, pageHeight, onProgress) {
+async function extractOcrWordsByColumns(pdf, pageIndex, boundaries, pageWidth, pageHeight, onProgress, diagnostics = null) {
   const rendered = await renderPage(pdf, pageIndex, FIRST_PASS_ZOOM, 0);
   const scaleX = rendered.canvas.width / pageWidth;
   const scaleY = rendered.canvas.height / pageHeight;
@@ -646,19 +740,38 @@ async function extractOcrWordsByColumns(pdf, pageIndex, boundaries, pageWidth, p
       const crop = makeColumnCrop(rendered.canvas, pixelLeft, pixelRight);
       const enlargement = crop.width < 450 ? 1.75 : 1.5;
       const prepared = makeAutocontrastCanvas(crop, enlargement, 16, false);
-      crop.width = 1;
-      crop.height = 1;
       onProgress(`OCR page ${pageIndex + 1}, column ${columnIndex + 1} of ${boundaries.length - 1}...`);
 
       let recognized;
+      const columnStarted = performance.now();
       try {
         recognized = await recognizeCanvas(prepared.canvas, onProgress, {
           psm: 6,
-          minConfidence: FIRST_PASS_MIN_CONFIDENCE
+          minConfidence: FIRST_PASS_MIN_CONFIDENCE,
+          captureTsv: Boolean(diagnostics)
         });
+        const recognitionElapsedMs = Math.round(performance.now() - columnStarted);
+        if (diagnostics) {
+          diagnostics.push({
+            page: pageIndex + 1,
+            column: columnIndex + 1,
+            pdfLeft,
+            pdfRight,
+            renderedPixelLeft: pixelLeft,
+            renderedPixelRight: pixelRight,
+            enlargement,
+            cropPng: await canvasToBlob(crop),
+            ocrInputPng: await canvasToBlob(prepared.canvas),
+            tsv: recognized.rawTsv || '',
+            recognizedWordCount: recognized.length,
+            elapsedMs: recognitionElapsedMs
+          });
+        }
       } finally {
         prepared.canvas.width = 1;
         prepared.canvas.height = 1;
+        crop.width = 1;
+        crop.height = 1;
       }
 
       for (const item of recognized) {
@@ -695,12 +808,13 @@ async function extractOcrWordsByColumns(pdf, pageIndex, boundaries, pageWidth, p
   return words;
 }
 
-export async function generateWorkbook(pdf, columnsByPage, onProgress = () => {}) {
+export async function generateWorkbook(pdf, columnsByPage, onProgress = () => {}, options = {}) {
   const XLSX = await loadGlobalScript('XLSX', 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
   const workbook = XLSX.utils.book_new();
   const usedOcrPages = [];
   const allReviewRows = [];
   const arithmeticWarnings = [];
+  const diagnostics = options.captureDiagnostics ? [] : null;
   let blankRecovered = 0;
   let numericRechecked = 0;
   let wroteSheet = false;
@@ -721,7 +835,7 @@ export async function generateWorkbook(pdf, columnsByPage, onProgress = () => {}
     const usedOcr = words.length === 0;
     if (usedOcr) {
       usedOcrPages.push(pageIndex + 1);
-      words = await extractOcrWordsByColumns(pdf, pageIndex, boundaries, pageWidth, pageHeight, onProgress);
+      words = await extractOcrWordsByColumns(pdf, pageIndex, boundaries, pageWidth, pageHeight, onProgress, diagnostics);
     }
 
     const { rows, centres, confidences } = buildTableRowsWithGeometry(
@@ -784,6 +898,38 @@ export async function generateWorkbook(pdf, columnsByPage, onProgress = () => {}
     blankRecovered,
     numericRechecked,
     reviewCount: allReviewRows.length,
-    arithmeticWarnings: arithmeticWarnings.length
+    arithmeticWarnings: arithmeticWarnings.length,
+    diagnostics
   };
+}
+
+
+/** Package the exact per-column OCR inputs and raw Tesseract TSV for debugging. */
+export async function createOcrDiagnosticsZip(diagnostics) {
+  if (!diagnostics?.length) throw new Error('No OCR diagnostics were captured.');
+  const JSZip = await loadGlobalScript('JSZip', 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js');
+  const zip = new JSZip();
+  const summary = [
+    'PDF Tools OCR Diagnostics',
+    'These files show the exact first-pass column crops and processed images sent to Tesseract.js.',
+    'The PDF itself is not included.',
+    '',
+    'page,column,pdf_left,pdf_right,render_pixel_left,render_pixel_right,enlargement,recognized_words,elapsed_ms'
+  ];
+  const tsvRows = ['page\tcolumn\tword_count\telapsed_ms\traw_tsv_file'];
+  for (const item of diagnostics) {
+    const prefix = `page_${String(item.page).padStart(3, '0')}_column_${String(item.column).padStart(2, '0')}`;
+    zip.file(`${prefix}_source_crop.png`, item.cropPng);
+    zip.file(`${prefix}_tesseract_input.png`, item.ocrInputPng);
+    zip.file(`${prefix}_tesseract.tsv`, item.tsv || '');
+    summary.push([
+      item.page, item.column, item.pdfLeft.toFixed(3), item.pdfRight.toFixed(3),
+      item.renderedPixelLeft, item.renderedPixelRight, item.enlargement,
+      item.recognizedWordCount, item.elapsedMs
+    ].join(','));
+    tsvRows.push([item.page, item.column, item.recognizedWordCount, item.elapsedMs, `${prefix}_tesseract.tsv`].join('\t'));
+  }
+  zip.file('README.txt', summary.join('\n'));
+  zip.file('column_summary.tsv', tsvRows.join('\n'));
+  return zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 3 } });
 }

@@ -20,7 +20,7 @@ export async function getOcrEngine(onStatus = () => {}) {
       const localRoot = new URL('.', import.meta.url).href.replace(/\/$/, '');
       workerInstance = await Tesseract.createWorker(
         ['eng', 'fra'],
-        Tesseract.OEM.LSTM_ONLY,
+        Tesseract.OEM.DEFAULT,
         {
           workerPath: `${TESSERACT_CDN}/worker.min.js`,
           corePath: CORE_CDN,
@@ -40,7 +40,6 @@ export async function getOcrEngine(onStatus = () => {}) {
       await workerInstance.setParameters({
         tessedit_pageseg_mode: '6',
         preserve_interword_spaces: '1',
-        user_defined_dpi: '300'
       });
       onStatus('Tesseract.js 7 is ready (English + French).');
       return workerInstance;
@@ -95,10 +94,11 @@ export async function recognizeCanvas(canvas, onStatus = () => {}, options = {})
     tessedit_pageseg_mode: psm,
     tessedit_char_whitelist: whitelist,
     preserve_interword_spaces: '1',
-    user_defined_dpi: '300'
   });
   const { data } = await worker.recognize(canvas, {}, { tsv: true });
-  return parseTsv(data?.tsv, Number.isFinite(options.minConfidence) ? options.minConfidence : 10);
+  const words = parseTsv(data?.tsv, Number.isFinite(options.minConfidence) ? options.minConfidence : 10);
+  if (options.captureTsv) words.rawTsv = data?.tsv || '';
+  return words;
 }
 
 export async function terminateOcrEngine() {
