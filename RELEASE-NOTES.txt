@@ -1,0 +1,9 @@
+PDF Tools v1.0.4
+
+Fix: scanned PDF previews that use JBIG2 image compression now receive the PDF.js 6.5.438 WebAssembly decoder directory through getDocument({ wasmUrl }).
+
+The supplied '26 Report.pdf' is a one-page, letter-size scan with a 3400 x 4400 JBIG2 image, no text layer, and page rotation metadata of 0 degrees. The scan content is itself sideways.
+
+The page renderer now uses page.render({ canvas, viewport, background }) and explicitly sizes the canvas in CSS pixels.
+
+Validation: static JavaScript syntax checks, root-only archive check, ZIP integrity check, and language archive integrity. Live Chromium/CDN integration was not verified in this environment.

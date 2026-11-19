@@ -1,4 +1,4 @@
-# PDF Tools v1.0.3 — flat GitHub Pages edition
+# PDF Tools v1.0.4 — flat GitHub Pages edition
 
 This is a browser-only PDF utility app designed to be hosted as a static site on GitHub Pages. **Every required project file is in this repository root.** Do not create `src`, `public`, `assets`, `.github`, or other folders.
 
@@ -33,7 +33,7 @@ This is not an air-gapped application: the browser downloads pinned JavaScript l
 
 The application is a no-build static site and loads the following pinned libraries at runtime:
 
-- PDF.js 6.5.438 and its matching worker from jsDelivr.
+- PDF.js 6.5.438 and its matching worker from jsDelivr. The PDF.js WASM decoder directory is explicitly configured because scanned PDFs may contain JBIG2 or JPEG 2000 images; omitting `wasmUrl` can cause the page count to load while the scanned page itself renders blank.
 - pdf-lib 1.17.1 from jsDelivr.
 - SheetJS 0.20.3 from its official CDN distribution.
 - Tesseract.js 7.0.0 and tesseract.js-core 7.0.0 from jsDelivr. The Tesseract.js worker is created through its Blob-worker mechanism to avoid a direct cross-origin Worker constructor. The worker and WASM runtime are CDN-hosted; `eng.traineddata.gz` and `fra.traineddata.gz` are local root files.
@@ -57,4 +57,12 @@ Annotation export uses PDF.js page viewports to map editor coordinates back to P
 
 ## Version
 
-Application version: **1.0.3**.
+Application version: **1.0.4**.
+
+## v1.0.4 hotfix
+
+The supplied test file (`26 Report.pdf`) is a one-page letter-size scanned PDF. Its page content is a 3400 x 4400 pixel JBIG2-compressed image, with no text layer and no page-level rotation. PDF.js could parse the page tree but did not have the WASM decoder directory configured, so the embedded scan was not painted. Version 1.0.4 sets `wasmUrl` to the matching PDF.js 6.5.438 `wasm/` directory and uses the documented canvas render parameter.
+
+The test PDF's scanned content itself is rotated sideways within the page image; the PDF page rotation metadata is 0 degrees. After rendering is restored, the preview will show that same sideways scan. Use Rotate PDF to correct its orientation if desired.
+
+This hotfix has passed static source checks and ZIP validation. A live Chromium run against the public CDN could not be completed in this environment, so the fix still needs confirmation in the deployed GitHub Pages site.

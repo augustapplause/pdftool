@@ -2,7 +2,9 @@ import { RENDER_ZOOM } from './config.js';
 import { loadGlobalScript } from './vendor.js';
 
 const PDFJS_VERSION = '6.5.438';
-const PDFJS_CDN = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build`;
+const PDFJS_ROOT = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}`;
+const PDFJS_CDN = `${PDFJS_ROOT}/build`;
+const PDFJS_WASM = `${PDFJS_ROOT}/wasm/`;
 let pdfjsPromise;
 
 async function getPdfJs() {
@@ -25,7 +27,14 @@ async function getPdfLib() {
 export async function openPdf(file) {
   const pdfjsLib = await getPdfJs();
   const bytes = new Uint8Array(await file.arrayBuffer());
-  const pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+  // PDF.js 6 moved JBIG2 and JPEG 2000 decoding to WebAssembly.
+  // Supplying wasmUrl is essential for scanned PDFs that embed JBIG2 images;
+  // without it, a PDF can load and report its page count while the scan renders blank.
+  const pdf = await pdfjsLib.getDocument({
+    data: bytes.slice(),
+    wasmUrl: PDFJS_WASM,
+    useWasm: true
+  }).promise;
   return { bytes, pdf, pageCount: pdf.numPages };
 }
 
@@ -34,12 +43,13 @@ export async function renderPage(pdf, pageIndex, zoom = RENDER_ZOOM, rotation = 
   const effectiveRotation = ((page.rotate || 0) + rotation + 360) % 360;
   const viewport = page.getViewport({ scale: zoom, rotation: effectiveRotation });
   const canvas = document.createElement('canvas');
-  const context = canvas.getContext('2d', { alpha: false });
   canvas.width = Math.ceil(viewport.width);
   canvas.height = Math.ceil(viewport.height);
-  context.fillStyle = '#ffffff';
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  await page.render({ canvasContext: context, viewport }).promise;
+  canvas.style.width = `${Math.ceil(viewport.width)}px`;
+  canvas.style.height = `${Math.ceil(viewport.height)}px`;
+  canvas.style.background = '#ffffff';
+  // Use the current PDF.js canvas API. The renderer obtains its own 2D context.
+  await page.render({ canvas, viewport, background: '#ffffff' }).promise;
   return { canvas, viewport, page };
 }
 
