@@ -81,7 +81,9 @@ export async function renderXlsx() {
       if (output.usedOcrPages.length) details.push(`Tesseract.js was used on page(s): ${output.usedOcrPages.join(', ')}.`);
       else details.push('The XLSX was generated from the PDF text layer; OCR was not needed.');
       if (output.blankRecovered) details.push(`Targeted OCR recovered ${output.blankRecovered} previously blank cell(s).`);
-      if (output.numericCorrected) details.push(`Numeric validation corrected ${output.numericCorrected} suspicious cell(s).`);
+      if (output.numericRechecked) details.push(`Image-based OCR rechecks updated ${output.numericRechecked} cell(s).`);
+      if (output.reviewCount) details.push(`OCR Review worksheet flags ${output.reviewCount} cell(s) for inspection.`);
+      if (output.arithmeticWarnings) details.push(`Arithmetic diagnostics flagged ${output.arithmeticWarnings} possible inconsistency/ies. No values were changed by these checks.`);
       progress.textContent = details.join(' '); progress.className = 'status success';
       toast('XLSX generated.');
     } catch (error) { console.error(error); toast(`XLSX generation failed: ${error.message}`, 7000); }

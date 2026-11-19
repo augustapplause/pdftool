@@ -1,68 +1,73 @@
-# PDF Tools v1.0.4 — flat GitHub Pages edition
+# PDF Tools v1.0.5 - flat GitHub Pages edition
 
-This is a browser-only PDF utility app designed to be hosted as a static site on GitHub Pages. **Every required project file is in this repository root.** Do not create `src`, `public`, `assets`, `.github`, or other folders.
+A static browser application for six local PDF workflows: redact, convert to XLSX, extract plain text, rotate, annotate and split. The project is structured so every application file is placed directly in the GitHub repository root.
+
+## Privacy and processing
+
+The selected PDF is read with the browser File API and processed in browser memory. The PDF contents are not uploaded to GitHub or to a PDF-processing server. Tesseract.js runtime files are fetched from pinned public CDNs when OCR is first used; the English and French trained data files are included locally in this repository. OCR requests operate on in-memory canvas images in the browser.
+
+The application does not use server-side processing, a database, analytics or telemetry. Normal requests to the static-host/CDN providers expose ordinary network metadata such as IP address.
 
 ## Deploy to GitHub Pages
 
-1. Extract this ZIP.
-2. Upload every file inside it directly to the top level of your GitHub repository (the same level as `index.html`).
-3. Commit the files to the `main` branch.
-4. Open **Settings → Pages**.
-5. Under **Build and deployment**, select **Deploy from a branch**.
-6. Select branch **main** and folder **/(root)**, then save.
-7. Open the Pages URL shown by GitHub.
+1. Download and extract `pdf-tools-v1.0.5.zip`.
+2. Upload every file from the extracted folder directly into the root of your GitHub repository. Do not create a subfolder.
+3. Commit the files to your `main` branch.
+4. In GitHub, open **Settings -> Pages**.
+5. Choose **Deploy from a branch**, select `main`, and select `/(root)`.
+6. Save and open the Pages URL after deployment completes.
 
-No npm, Node.js, build step, backend, or GitHub Actions workflow is required.
+No npm, Python, Node server or build step is required.
 
-## Included tools
+## Files
 
-- Redact PDF — draws the selected redaction areas into rasterized replacement pages before export. This removes the covered original content, but the exported pages are raster images and their text is no longer selectable.
-- Convert PDF to XLSX — click the ruler to add/remove boundaries, or drag blue boundary lines to reposition them. Boundaries are stored independently by page. Selectable PDF text is extracted first; image-only pages use Tesseract.js 7. English and French language data is included. The converter includes targeted blank-cell OCR, numeric validation, and decimal-recovery heuristics.
-- Convert PDF to Plain Text — extracts selectable text from all pages. Scanned pages are not OCR'd in this tool.
-- Rotate PDF — rotate individual pages in 90-degree increments and export the document.
-- Annotate PDF — add and manipulate text, images, shapes, lines, arrows, and pen marks; set colour and thickness; remove a selected image background colour; and export the annotated document.
-- Split PDF — select pages, reorder the output sequence, and export the selected pages.
+All files below are at repository root:
 
-## Local document privacy
+- `index.html` - app shell
+- `styles.css` - application styling
+- `app.js`, `config.js`, `state.js`, `ui.js`, `vendor.js` - app structure and state
+- `pdf.js`, `redact.js`, `xlsx.js`, `xlsx-tool.js`, `ocr.js`, `text.js`, `rotate.js`, `annotate.js`, `split.js` - tool modules
+- `eng.traineddata.gz`, `fra.traineddata.gz` - local Tesseract language data
+- `README.md`, `RELEASE-NOTES.txt` - documentation
 
-The selected PDF is read with the browser File API and processed in the browser tab. The application does not send the PDF or extracted document content to a server or OCR service. Generated files are created in browser memory and downloaded from a local Blob URL.
+## XLSX conversion workflow
 
-This is not an air-gapped application: the browser downloads pinned JavaScript libraries and the Tesseract.js worker/WASM runtime from public CDNs. Those requests do not include the user's PDF. English and French Tesseract traineddata files are included in this ZIP and loaded from the same GitHub Pages origin as the application. No analytics or telemetry is included.
+The XLSX converter retains the original workflow:
 
-## Runtime libraries
+1. Upload a PDF locally.
+2. Select a page.
+3. Click the ruler to add/remove vertical column boundaries, or drag an existing blue boundary to move it.
+4. Boundaries are saved independently per page.
+5. Generate a workbook with one worksheet per page that has marked columns.
 
-The application is a no-build static site and loads the following pinned libraries at runtime:
+Selectable PDF text is preferred. Image-only pages use Tesseract.js 7 with English and French language data. OCR is performed one user-defined column at a time, then words are grouped into table rows by their page coordinates.
 
-- PDF.js 6.5.438 and its matching worker from jsDelivr. The PDF.js WASM decoder directory is explicitly configured because scanned PDFs may contain JBIG2 or JPEG 2000 images; omitting `wasmUrl` can cause the page count to load while the scanned page itself renders blank.
-- pdf-lib 1.17.1 from jsDelivr.
-- SheetJS 0.20.3 from its official CDN distribution.
-- Tesseract.js 7.0.0 and tesseract.js-core 7.0.0 from jsDelivr. The Tesseract.js worker is created through its Blob-worker mechanism to avoid a direct cross-origin Worker constructor. The worker and WASM runtime are CDN-hosted; `eng.traineddata.gz` and `fra.traineddata.gz` are local root files.
+### OCR accuracy refinements in v1.0.5
 
-An internet connection is required to load these runtime libraries and the OCR worker/WASM files. Once loaded, document processing takes place locally. A fully offline deployment would require separately downloading and self-hosting the JS libraries, PDF.js worker, Tesseract worker, and every compatible Tesseract core/WASM build; that is not included here.
+- Scanned pages are rendered at 5.5x, approximating the embedded scan resolution in the supplied sample, while keeping the coordinates tied to PDF page points.
+- Column crops receive grayscale histogram autocontrast and high-quality enlargement before OCR.
+- First-pass word confidence below 10 is discarded, matching the provided Streamlit implementation.
+- Word-level confidence is retained and summarized at cell level.
+- Suspicious blank and low-confidence populated cells may receive targeted OCR retries using several segmentation modes and an adaptive-threshold image variant.
+- Decimal formatting can be proposed only when the column has a strong decimal-place pattern, the source string is a magnitude outlier, and a high-confidence second image read confirms the digit sequence.
+- Leading `=` or `|` OCR artefacts are stripped only when the remaining text is a valid numeric token.
 
-## Browser and performance notes
+These safeguards are conservative. OCR may still misread a difficult scan; the review sheet helps identify uncertain results instead of presenting every recognition as reliable.
 
-Use a current Chromium-based browser or Firefox. The app uses ES modules, WebAssembly, Canvas, Blob URLs, `createImageBitmap`, and browser file-download APIs. OCR and PDF processing can be memory-intensive, particularly for large scanned documents. Tesseract uses a Web Worker so recognition should not block the main UI thread, but initial runtime/model loading can take time. The language data is cached by Tesseract.js after its first successful load.
+## OCR Review worksheet and arithmetic diagnostics
 
-The PDF-to-XLSX converter maps native text items to word positions using measured browser font metrics. This is more precise than assigning text by character count, but remains an approximation of the original PyMuPDF word boxes and must be validated against real PDFs, especially where text sits close to a column boundary.
+When review items exist, the workbook contains an additional `OCR Review` worksheet. It reports low-confidence cells, non-numeric results in predominantly numeric columns, possible missing decimal punctuation and supported arithmetic diagnostics.
 
-Annotation export uses PDF.js page viewports to map editor coordinates back to PDF coordinates, including pre-rotated pages. Complex source PDFs and rotated image annotations still require visual verification. The redaction export intentionally rasterizes every page to ensure obscured content is not retained underneath a black overlay.
+Arithmetic validation is **diagnostic only**. It never modifies values in the `Page_N` worksheets. The initial arithmetic profile is deliberately limited to a clearly detected Plan Summary Report layout; the app does not assume financial formulas for arbitrary documents. A discrepancy is only a prompt to inspect the source image, not proof that OCR is wrong.
 
-## Validation status
+## Limitations
 
-- All JavaScript files pass Node syntax checks.
-- The English and French `.traineddata.gz` files are included in the repository root and pass gzip integrity checks.
-- The ZIP is intended to contain root-level files only; no nested folders are required.
-- A full live-browser integration run against public CDN dependencies and representative PDFs has **not** been completed in the build environment. The first live deployment should therefore be treated as a test release, particularly for Tesseract initialization, model loading, XLSX accuracy, PDF export, and large-document memory use.
+- Tesseract.js runtime and core/WASM are loaded from pinned jsDelivr URLs. English and French trained data are included in the repository. If the CDN is unavailable or blocked, OCR initialization will fail with an error; PDF operations that do not require OCR remain available.
+- First OCR use downloads the Tesseract runtime/core and can take time. The language data can be served locally from the repository.
+- OCR quality depends on scan quality, skew, font, contrast, boundaries and the number of columns. The supplied source report is used as a regression sample, but other PDF layouts require testing.
+- This release has passed source-level JavaScript syntax checks and ZIP/path validation. It has not been verified end-to-end in the user's live GitHub Pages browser. Browser runtime and export tests remain necessary.
+- Redaction output is rasterized to remove covered source content; the redacted pages are not text-selectable.
 
 ## Version
 
-Application version: **1.0.4**.
-
-## v1.0.4 hotfix
-
-The supplied test file (`26 Report.pdf`) is a one-page letter-size scanned PDF. Its page content is a 3400 x 4400 pixel JBIG2-compressed image, with no text layer and no page-level rotation. PDF.js could parse the page tree but did not have the WASM decoder directory configured, so the embedded scan was not painted. Version 1.0.4 sets `wasmUrl` to the matching PDF.js 6.5.438 `wasm/` directory and uses the documented canvas render parameter.
-
-The test PDF's scanned content itself is rotated sideways within the page image; the PDF page rotation metadata is 0 degrees. After rendering is restored, the preview will show that same sideways scan. Use Rotate PDF to correct its orientation if desired.
-
-This hotfix has passed static source checks and ZIP validation. A live Chromium run against the public CDN could not be completed in this environment, so the fix still needs confirmation in the deployed GitHub Pages site.
+Application version: **1.0.5**.

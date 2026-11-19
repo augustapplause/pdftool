@@ -1,9 +1,22 @@
-PDF Tools v1.0.4
+PDF Tools v1.0.5
 
-Fix: scanned PDF previews that use JBIG2 image compression now receive the PDF.js 6.5.438 WebAssembly decoder directory through getDocument({ wasmUrl }).
+OCR accuracy and review update.
 
-The supplied '26 Report.pdf' is a one-page, letter-size scan with a 3400 x 4400 JBIG2 image, no text layer, and page rotation metadata of 0 degrees. The scan content is itself sideways.
+- Increased scanned-page OCR render resolution to 5.5x, with page-size based on PDF points and source image density.
+- Added grayscale histogram autocontrast and high-quality enlargement before first-pass OCR.
+- Restored the source Streamlit workflow's first-pass minimum word confidence of 10.
+- Preserved per-word confidence scores and added per-cell confidence diagnostics.
+- Improved row grouping with stable median anchors to reduce drift between columns.
+- Added targeted cell-level OCR retries using multiple page segmentation modes and an adaptive-threshold variant.
+- Added cautious decimal punctuation recovery: a column pattern alone cannot change a cell; a high-confidence image re-read must confirm the same digits first.
+- Added safe removal of leading OCR '=' or '|' artefacts only when the remainder is a valid numeric token.
+- Added an OCR Review worksheet for low-confidence, malformed numeric and supported arithmetic diagnostics.
+- Arithmetic checks are diagnostic only. They never change, replace, or repair values in Page_N worksheets.
+- Arithmetic diagnostics are enabled only when a Plan Summary Report layout is detected; unrelated documents do not receive assumed formula checks.
+- Kept the flat GitHub Pages repository-root structure and browser-local PDF processing.
 
-The page renderer now uses page.render({ canvas, viewport, background }) and explicitly sizes the canvas in CSS pixels.
-
-Validation: static JavaScript syntax checks, root-only archive check, ZIP integrity check, and language archive integrity. Live Chromium/CDN integration was not verified in this environment.
+Validation:
+- JavaScript syntax checks passed for every application module.
+- ZIP integrity and root-only structure checks passed.
+- Sample source PDF and previous XLSX were inspected to guide the changes.
+- The full GitHub Pages browser workflow and Paddle-free Tesseract.js network loading were not executable in this environment; live browser verification remains required.

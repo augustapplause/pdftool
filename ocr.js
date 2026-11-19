@@ -16,15 +16,8 @@ export async function getOcrEngine(onStatus = () => {}) {
   if (!workerPromise) {
     workerPromise = (async () => {
       onStatus('Loading Tesseract.js 7 and English/French OCR data. First use may take a little while...');
-      const Tesseract = await loadGlobalScript(
-        'Tesseract',
-        `${TESSERACT_CDN}/tesseract.min.js`
-      );
+      const Tesseract = await loadGlobalScript('Tesseract', `${TESSERACT_CDN}/tesseract.min.js`);
       const localRoot = new URL('.', import.meta.url).href.replace(/\/$/, '');
-
-      // Tesseract.js uses a Blob URL worker by default. The worker script is
-      // imported from the pinned CDN inside that same-origin Blob worker,
-      // avoiding a direct cross-origin Worker constructor call.
       workerInstance = await Tesseract.createWorker(
         ['eng', 'fra'],
         Tesseract.OEM.LSTM_ONLY,
@@ -44,7 +37,6 @@ export async function getOcrEngine(onStatus = () => {}) {
         },
         {}
       );
-
       await workerInstance.setParameters({
         tessedit_pageseg_mode: '6',
         preserve_interword_spaces: '1',
@@ -61,7 +53,8 @@ export async function getOcrEngine(onStatus = () => {}) {
   return workerPromise;
 }
 
-function parseTsv(tsv) {
+/** Parse Tesseract TSV and preserve geometry plus confidence for every word. */
+function parseTsv(tsv, minConfidence = 10) {
   if (typeof tsv !== 'string' || !tsv.trim()) return [];
   const lines = tsv.trim().split(/\r?\n/);
   const words = [];
@@ -69,15 +62,21 @@ function parseTsv(tsv) {
     const columns = lines[i].split('\t');
     if (columns.length < 12 || Number(columns[0]) !== 5) continue;
     const text = columns.slice(11).join('\t').trim();
+    const block = Number(columns[2]);
+    const paragraph = Number(columns[3]);
+    const line = Number(columns[4]);
     const left = Number(columns[6]);
     const top = Number(columns[7]);
     const width = Number(columns[8]);
     const height = Number(columns[9]);
     const confidence = Number(columns[10]);
-    if (!text || ![left, top, width, height, confidence].every(Number.isFinite) || confidence < 0) continue;
+    if (!text || ![left, top, width, height, confidence].every(Number.isFinite) || confidence < minConfidence) continue;
     words.push({
       text,
       confidence,
+      block,
+      paragraph,
+      line,
       x0: left,
       y0: top,
       x1: left + width,
@@ -87,10 +86,7 @@ function parseTsv(tsv) {
   return words;
 }
 
-/**
- * Recognize a browser canvas. psm is the Tesseract page segmentation mode;
- * whitelist is useful for targeted numeric-cell recovery.
- */
+/** Recognize a browser canvas. Default first-pass confidence threshold mirrors the Python workflow. */
 export async function recognizeCanvas(canvas, onStatus = () => {}, options = {}) {
   const worker = await getOcrEngine(onStatus);
   const psm = String(options.psm ?? 6);
@@ -102,7 +98,7 @@ export async function recognizeCanvas(canvas, onStatus = () => {}, options = {})
     user_defined_dpi: '300'
   });
   const { data } = await worker.recognize(canvas, {}, { tsv: true });
-  return parseTsv(data?.tsv);
+  return parseTsv(data?.tsv, Number.isFinite(options.minConfidence) ? options.minConfidence : 10);
 }
 
 export async function terminateOcrEngine() {
@@ -110,12 +106,11 @@ export async function terminateOcrEngine() {
   workerInstance = null;
   workerPromise = null;
   if (worker) {
-    try { await worker.terminate(); } catch (error) { console.warn('Could not terminate OCR worker cleanly:', error); }
+    try { await worker.terminate(); }
+    catch (error) { console.warn('Could not terminate OCR worker cleanly:', error); }
   }
 }
 
 window.addEventListener('pdf-tools-tool-change', () => {
-  // Release the OCR worker when the user leaves the XLSX tool.
-  // Any in-flight recognition is intentionally cancelled with the old tool state.
   terminateOcrEngine();
 });
