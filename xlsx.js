@@ -1,4 +1,4 @@
-import * as XLSX from 'https://esm.sh/xlsx@0.18.5?bundle';
+import { loadGlobalScript } from './vendor.js';
 import { renderPage, getNativeWords } from './pdf.js';
 import { recognizeCanvas } from './ocr.js';
 
@@ -31,20 +31,50 @@ function prepareCellVariant(source, threshold = false) {
   return { canvas, factor, border };
 }
 
-async function recognizeCell(source, onProgress) {
-  const first = prepareCellVariant(source, false);
+async function recognizeCell(source, onProgress, numericOnly = false, expectedDecimalPlaces = null) {
+  const whitelist = numericOnly ? '0123456789.,()%-$' : '';
+  const configs = [7, 8, 13];
+  const variants = [prepareCellVariant(source, false)];
+  let thresholdVariant = null;
+  const candidates = [];
   try {
-    let found = await recognizeCanvas(first.canvas, onProgress);
-    let best = found.sort((a, b) => b.confidence - a.confidence)[0];
-    if (best && best.confidence >= 82) return best.text;
-    const second = prepareCellVariant(source, true);
-    try {
-      found = await recognizeCanvas(second.canvas, onProgress);
-      const thresholdBest = found.sort((a, b) => b.confidence - a.confidence)[0];
-      if (!best || (thresholdBest && thresholdBest.confidence > best.confidence)) best = thresholdBest;
-    } finally { second.canvas.width = 1; second.canvas.height = 1; }
-    return best?.confidence >= 10 ? best.text : '';
-  } finally { first.canvas.width = 1; first.canvas.height = 1; }
+    for (let variantIndex = 0; variantIndex < 2; variantIndex += 1) {
+      if (variantIndex === 1) {
+        thresholdVariant = prepareCellVariant(source, true);
+        variants.push(thresholdVariant);
+      }
+      const variant = variants[variantIndex];
+      for (const psm of configs) {
+        const words = await recognizeCanvas(variant.canvas, onProgress, { psm, whitelist });
+        let candidate = words.map((word) => word.text).join(' ').trim();
+        if (!candidate) continue;
+        if (numericOnly) {
+          candidate = candidate.replace(/\s+/g, '');
+          if (!looksNumeric(candidate)) continue;
+        }
+        const confidence = words.length
+          ? words.reduce((sum, word) => sum + word.confidence, 0) / words.length
+          : 0;
+        let score = confidence;
+        let exactDecimal = false;
+        if (numericOnly && /\d/.test(candidate)) score += 8;
+        if (numericOnly && expectedDecimalPlaces != null) {
+          exactDecimal = new RegExp(`^\\(?-?\\d[\\d,]*\\.\\d{${expectedDecimalPlaces}}%?\\)?$`).test(candidate);
+          if (exactDecimal) score += 30;
+          else if (!candidate.includes('.') && /^\d{5,}$/.test(candidate)) score -= 10;
+        }
+        if ((exactDecimal && score >= 75) || (expectedDecimalPlaces == null && score >= 82)) return candidate;
+        candidates.push({ score, candidate });
+      }
+    }
+    candidates.sort((a, b) => b.score - a.score || b.candidate.length - a.candidate.length);
+    return candidates[0]?.score >= 10 ? candidates[0].candidate : '';
+  } finally {
+    for (const variant of variants) {
+      variant.canvas.width = 1;
+      variant.canvas.height = 1;
+    }
+  }
 }
 
 function groupWords(words, tolerance = 4) {
@@ -188,7 +218,9 @@ async function recoverSuspiciousNumericCells(pdf, pageIndex, boundaries, rows, c
       const crop = document.createElement('canvas'); crop.width = right - left; crop.height = bottom - top;
       crop.getContext('2d').drawImage(rendered.canvas, left, top, crop.width, crop.height, 0, 0, crop.width, crop.height);
       onProgress(`Validating numeric OCR on page ${pageIndex + 1}, row ${r + 1}, column ${col + 1}...`);
-      const candidate = (await recognizeCell(crop, onProgress)).replace(/\s+/g, '');
+      let candidate;
+      try { candidate = (await recognizeCell(crop, onProgress, true, decimalPlaces)).replace(/\s+/g, ''); }
+      finally { crop.width = 1; crop.height = 1; }
       const exact = new RegExp(`^\\(?-?\\d+\\.\\d{${decimalPlaces}}%?\\)?$`).test(candidate);
       if (exact) { rows[r][col] = candidate; corrected++; continue; }
       const digits = /^\d+$/.test(candidate) ? candidate : original;
@@ -196,10 +228,12 @@ async function recoverSuspiciousNumericCells(pdf, pageIndex, boundaries, rows, c
       if (repaired) { rows[r][col] = repaired; corrected++; }
     }
   }
+  rendered.canvas.width = 1; rendered.canvas.height = 1;
   return corrected;
 }
 
 export async function generateWorkbook(pdf, columnsByPage, onProgress = () => {}) {
+  const XLSX = await loadGlobalScript('XLSX', 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
   const workbook = XLSX.utils.book_new();
   const usedOcrPages = [];
   let blankRecovered = 0;
@@ -232,7 +266,9 @@ export async function generateWorkbook(pdf, columnsByPage, onProgress = () => {}
         const enlarge = crop.width < 450 ? 1.75 : 1.5;
         const padded = document.createElement('canvas'); padded.width = Math.ceil(crop.width * enlarge) + 32; padded.height = Math.ceil(crop.height * enlarge) + 32;
         const paddedCtx = padded.getContext('2d'); paddedCtx.fillStyle = '#ffffff'; paddedCtx.fillRect(0, 0, padded.width, padded.height); paddedCtx.filter = 'grayscale(1) contrast(1.2)'; paddedCtx.drawImage(crop, 16, 16, crop.width * enlarge, crop.height * enlarge); paddedCtx.filter = 'none';
-        const recognized = await recognizeCanvas(padded, onProgress);
+        const recognized = await recognizeCanvas(padded, onProgress, { psm: 6 });
+        padded.width = 1; padded.height = 1;
+        crop.width = 1; crop.height = 1;
         const trueLeft = boundaries[c] * scaleX;
         const trueRight = boundaries[c + 1] * scaleX;
         for (const item of recognized) {
@@ -249,6 +285,7 @@ export async function generateWorkbook(pdf, columnsByPage, onProgress = () => {}
         }
       }
       words = ocrWords;
+      rendered.canvas.width = 1; rendered.canvas.height = 1;
     }
     let { rows, centres } = assembleRows(words, boundaries, usedOcr ? 6 : 4);
     if (usedOcr && rows.length) {
@@ -271,11 +308,14 @@ export async function generateWorkbook(pdf, columnsByPage, onProgress = () => {}
           const y1 = Math.min(rendered.canvas.height, Math.ceil((centre + half) * sy));
           const crop = document.createElement('canvas'); crop.width = Math.max(1, x1 - x0); crop.height = Math.max(1, y1 - y0);
           crop.getContext('2d').drawImage(rendered.canvas, x0, y0, crop.width, crop.height, 0, 0, crop.width, crop.height);
-          let candidate = await recognizeCell(crop, onProgress);
+          let candidate;
+          try { candidate = await recognizeCell(crop, onProgress, numericCols.has(c)); }
+          finally { crop.width = 1; crop.height = 1; }
           if (numericCols.has(c)) { candidate = candidate.replace(/\s+/g, ''); if (!looksNumeric(candidate)) candidate = ''; }
           if (candidate) { rows[r][c] = candidate; blankRecovered++; }
         }
       }
+      rendered.canvas.width = 1; rendered.canvas.height = 1;
       rows = normalizeNumericSpacing(rows);
       numericCorrected += await recoverSuspiciousNumericCells(pdf, p, boundaries, rows, centres, width, height, onProgress);
     }

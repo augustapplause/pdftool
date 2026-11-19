@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { makeToolShell, button, status, toast, createDownload } from './ui.js';
 import { renderPage } from './pdf.js';
-import { PDFDocument, StandardFonts, rgb, degrees } from 'https://esm.sh/pdf-lib@1.17.1?bundle';
+import { loadGlobalScript } from './vendor.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const TOOL_NAMES = ['select', 'text', 'image', 'rectangle', 'circle', 'line', 'arrow', 'pen'];
@@ -15,12 +15,14 @@ function objectBounds(o) {
   return { x: o.x, y: o.y, w: Math.max(1, o.w), h: Math.max(1, o.h) };
 }
 function copy(o) { return JSON.parse(JSON.stringify(o)); }
+function dataUrlToBytes(dataUrl) { const encoded=dataUrl.split(',')[1]||''; const binary=atob(encoded); const bytes=new Uint8Array(binary.length); for(let i=0;i<binary.length;i+=1)bytes[i]=binary.charCodeAt(i); return bytes; }
 function saveHistory(page) {
   const data = state.toolState.annotate; const objects = data.objects.get(page) || [];
   if (!data.history.has(page)) data.history.set(page, []);
   const history = data.history.get(page); history.push(copy(objects)); if (history.length > 30) history.shift();
 }
-function colorRgb(hex) { const n = hex.replace('#', ''); return rgb(parseInt(n.slice(0,2),16)/255, parseInt(n.slice(2,4),16)/255, parseInt(n.slice(4,6),16)/255); }
+function colorRgb(hex, rgbFactory) { const n = hex.replace('#', ''); return rgbFactory(parseInt(n.slice(0,2),16)/255, parseInt(n.slice(2,4),16)/255, parseInt(n.slice(4,6),16)/255); }
+function rotateScreenPoint(point, center, angle) { const r=angle*Math.PI/180,c=Math.cos(r),s=Math.sin(r),dx=point.x-center.x,dy=point.y-center.y; return {x:center.x+dx*c-dy*s,y:center.y+dx*s+dy*c}; }
 
 export async function renderAnnotate() {
   makeToolShell('annotate'); if (!state.pdf) return;
@@ -54,7 +56,7 @@ export async function renderAnnotate() {
   const svg=svgEl('svg',{width:rendered.canvas.width,height:rendered.canvas.height,viewBox:`0 0 ${rendered.canvas.width} ${rendered.canvas.height}`}); stage.append(svg);
   const helper=document.createElement('p');helper.className='muted';helper.textContent='Use the toolbar above the PDF. Select, move, resize and rotate objects. Press Delete to remove the selected object; Ctrl+D duplicates it; Ctrl+Z undoes the last edit.';
   const actions=document.createElement('div');actions.className='toolbar';
-  const upload=document.createElement('input');upload.type='file';upload.accept='image/png,image/jpeg,image/bmp,image/gif,image/tiff,image/webp,image/svg+xml';upload.className='file-input';upload.style.maxWidth='380px';
+  const upload=document.createElement('input');upload.type='file';upload.accept='image/png,image/jpeg,image/bmp,image/gif,image/webp,image/svg+xml';upload.className='file-input';upload.style.maxWidth='380px';
   const uploadLabel=document.createElement('label');uploadLabel.className='control-label';uploadLabel.append('Upload an image to insert ',upload);
   upload.addEventListener('change',async()=>{const file=upload.files?.[0];if(!file)return;try{const bitmap=await createImageBitmap(file);const canvas=document.createElement('canvas');canvas.width=bitmap.width;canvas.height=bitmap.height;canvas.getContext('2d').drawImage(bitmap,0,0);const dataUrl=canvas.toDataURL('image/png');const id=`img_${Date.now()}`;data.images.set(id,{name:file.name,width:canvas.width,height:canvas.height,dataUrl,original:dataUrl});data.activeImageId=id;settings.tool='image';updateToolbar();draw();toast(`Image ready: ${file.name}`);}catch(e){toast(`Could not load image: ${e.message}`);}});
   const bgPanel=document.createElement('div');bgPanel.className='toolbar';
@@ -93,6 +95,68 @@ export async function renderAnnotate() {
   }
   let draft=null, action=null;
   const getPoint=(event)=>{const r=svg.getBoundingClientRect();return{x:event.clientX-r.left,y:event.clientY-r.top};};
+  let activeTextEditor = null;
+  function beginInlineText(point) {
+    if (activeTextEditor) activeTextEditor.finish(true);
+    const input = document.createElement('textarea');
+    input.className = 'inline-text';
+    input.rows = 1;
+    input.spellcheck = false;
+    const fs = Number(settings.fontSize || 18);
+    Object.assign(input.style, {
+      left: `${point.x}px`, top: `${point.y}px`, fontSize: `${fs}px`,
+      fontFamily: settings.font === 'Arial' ? 'Arial' : 'sans-serif',
+      fontWeight: settings.bold ? 'bold' : 'normal',
+      fontStyle: settings.italic ? 'italic' : 'normal',
+      textDecoration: settings.underline ? 'underline' : 'none',
+      color: settings.color, width: '2px', height: `${Math.ceil(fs * 1.3)}px`
+    });
+    stage.append(input);
+    let finished = false;
+    const measure = () => {
+      const lines = input.value.split('\n');
+      const longest = lines.reduce((a,b)=>a.length>=b.length?a:b,'');
+      input.style.width = `${Math.max(2, Math.ceil(longest.length * fs * .68) + 8)}px`;
+      input.style.height = `${Math.max(Math.ceil(fs * 1.3), Math.ceil(lines.length * fs * 1.2))}px`;
+    };
+    const finish = (save) => {
+      if (finished) return;
+      finished = true;
+      const text = input.value;
+      input.remove();
+      activeTextEditor = null;
+      if (save && text.trim()) {
+        saveHistory(page);
+        const lines = text.split('\n');
+        const longest = lines.reduce((a,b)=>a.length>=b.length?a:b,'');
+        const object = {
+          id: `ann_${Date.now()}`, type: 'text', x: point.x, y: point.y,
+          w: Math.max(20, longest.length * fs * .68), h: Math.max(fs * 1.35, lines.length * fs * 1.2),
+          text, fontSize: fs, font: settings.font, color: settings.color,
+          bold: settings.bold, italic: settings.italic, underline: settings.underline,
+          rotation: 0, thickness: settings.thickness
+        };
+        objects.push(object);
+        data.selected.set(page, object.id);
+        settings.tool = 'select';
+        updateToolbar();
+      }
+      draw();
+    };
+    activeTextEditor = { input, finish };
+    input.addEventListener('pointerdown', (event) => event.stopPropagation());
+    input.addEventListener('input', measure);
+    input.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.key === 'Escape') { event.preventDefault(); finish(false); }
+      else if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); finish(true); }
+    });
+    input.addEventListener('blur', () => queueMicrotask(() => {
+      if (activeTextEditor?.input === input) finish(true);
+    }));
+    measure();
+    requestAnimationFrame(() => input.focus({ preventScroll: true }));
+  }
   svg.addEventListener('pointerdown',(event)=>{
     const p=getPoint(event);const target=event.target;const handle=target.dataset.handle;const rotate=target.dataset.rotate;
     if(handle||rotate){const o=selected();if(!o)return;saveHistory(page);action={kind:handle?'resize':'rotate',corner:handle,original:copy(o),start:p,center:{x:objectBounds(o).x+objectBounds(o).w/2,y:objectBounds(o).y+objectBounds(o).h/2},startAngle:Math.atan2(p.y-(objectBounds(o).y+objectBounds(o).h/2),p.x-(objectBounds(o).x+objectBounds(o).w/2))};svg.setPointerCapture(event.pointerId);return;}
@@ -100,7 +164,7 @@ export async function renderAnnotate() {
     if(settings.tool==='select'){
       if(id){data.selected.set(page,id);const o=selected();saveHistory(page);action={kind:'move',original:copy(o),start:p};svg.setPointerCapture(event.pointerId);}else data.selected.set(page,null);draw();return;
     }
-    if(settings.tool==='text'){const text=prompt('Enter annotation text:');if(text){saveHistory(page);const o={id:`ann_${Date.now()}`,type:'text',x:p.x,y:p.y,w:Math.max(40,text.length*10),h:settings.fontSize*1.4,text,fontSize:settings.fontSize,color:settings.color,bold:settings.bold,italic:settings.italic,underline:settings.underline,rotation:0,thickness:settings.thickness};objects.push(o);data.selected.set(page,o.id);settings.tool='select';updateToolbar();draw();}return;}
+    if(settings.tool==='text'){beginInlineText(p);return;}
     if(settings.tool==='image'){const asset=data.images.get(data.activeImageId);if(!asset){toast('Upload an image above the editor first.');return;}const maxW=Math.min(280,rendered.canvas.width*.42),ratio=asset.width/asset.height,w=maxW,h=w/ratio;saveHistory(page);const o={id:`ann_${Date.now()}`,type:'image',assetId:data.activeImageId,x:p.x-w/2,y:p.y-h/2,w,h,rotation:0,thickness:settings.thickness};objects.push(o);data.selected.set(page,o.id);settings.tool='select';updateToolbar();draw();return;}
     if(['rectangle','circle','line','arrow'].includes(settings.tool)){saveHistory(page);draft=['line','arrow'].includes(settings.tool)?{id:`draft`,type:settings.tool,x1:p.x,y1:p.y,x2:p.x,y2:p.y,color:settings.color,thickness:settings.thickness}:{id:'draft',type:settings.tool,x:p.x,y:p.y,w:1,h:1,color:settings.color,thickness:settings.thickness};action={kind:'draw',start:p};svg.setPointerCapture(event.pointerId);draw();return;}
     if(settings.tool==='pen'){saveHistory(page);draft={id:'draft',type:'pen',points:[p],color:settings.color,thickness:settings.thickness};action={kind:'pen'};svg.setPointerCapture(event.pointerId);draw();}
@@ -121,18 +185,115 @@ export async function renderAnnotate() {
   window.addEventListener('keydown',(event)=>{if(event.key==='Delete'&&selected())deleteSelected();else if(event.key==='Escape'){data.selected.set(page,null);draw();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z')undo();else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='d')duplicateSelected();},{signal:keydownController.signal});
   window.addEventListener('pdf-tools-tool-change',()=>keydownController?.abort(),{signal:keydownController.signal});
   async function exportAnnotated(){
-    try{
-      const doc=await PDFDocument.load(state.bytes);const fontRegular=await doc.embedFont(StandardFonts.Helvetica);const fontBold=await doc.embedFont(StandardFonts.HelveticaBold);const fontItalic=await doc.embedFont(StandardFonts.HelveticaOblique);const fontBoldItalic=await doc.embedFont(StandardFonts.HelveticaBoldOblique);
-      for(let p=0;p<doc.getPageCount();p++){const pdfPage=doc.getPage(p);const pageW=pdfPage.getWidth(),pageH=pdfPage.getHeight();for(const o of data.objects.get(p)||[]){const col=colorRgb(o.color||'#000');const rot=degrees(-(o.rotation||0));const toX=(x)=>x/1.5;const toY=(y)=>pageH-y/1.5;
-          if(o.type==='rectangle')pdfPage.drawRectangle({x:toX(o.x),y:pageH-(o.y+o.h)/1.5,width:toX(o.w),height:toX(o.h),borderColor:col,borderWidth:Math.max(.5,o.thickness/1.5),rotate:rot});
-          else if(o.type==='circle')pdfPage.drawEllipse({x:toX(o.x+o.w/2),y:toY(o.y+o.h/2),xScale:toX(Math.abs(o.w/2)),yScale:toX(Math.abs(o.h/2)),borderColor:col,borderWidth:Math.max(.5,o.thickness/1.5),rotate:rot});
-          else if(o.type==='line'||o.type==='arrow'){const x1=toX(o.x1),y1=toY(o.y1),x2=toX(o.x2),y2=toY(o.y2);pdfPage.drawLine({start:{x:x1,y:y1},end:{x:x2,y:y2},thickness:Math.max(.5,o.thickness/1.5),color:col});if(o.type==='arrow'){const a=Math.atan2(y2-y1,x2-x1),len=Math.max(5,o.thickness*2.5)/1.5;for(const side of [-1,1])pdfPage.drawLine({start:{x:x2,y:y2},end:{x:x2-len*Math.cos(a+side*.55),y:y2-len*Math.sin(a+side*.55)},thickness:Math.max(.5,o.thickness/1.5),color:col});}}
-          else if(o.type==='pen'){for(let i=1;i<o.points.length;i++){pdfPage.drawLine({start:{x:toX(o.points[i-1].x),y:toY(o.points[i-1].y)},end:{x:toX(o.points[i].x),y:toY(o.points[i].y)},thickness:Math.max(.5,o.thickness/1.5),color:col});}}
-          else if(o.type==='text'){const font=o.bold&&o.italic?fontBoldItalic:o.bold?fontBold:o.italic?fontItalic:fontRegular;pdfPage.drawText(o.text,{x:toX(o.x),y:toY(o.y+(o.fontSize||18)),size:(o.fontSize||18)/1.5,font,color:col,rotate:rot,lineHeight:(o.fontSize||18)/1.5*1.2});if(o.underline){const y=toY(o.y+(o.fontSize||18))+2;pdfPage.drawLine({start:{x:toX(o.x),y},end:{x:toX(o.x)+Math.max(10,font.widthOfTextAtSize(o.text,(o.fontSize||18)/1.5)),y},thickness:.5,color:col});}}
-          else if(o.type==='image'){const asset=data.images.get(o.assetId);if(asset){const image=await doc.embedPng(await (await fetch(asset.dataUrl)).arrayBuffer());pdfPage.drawImage(image,{x:toX(o.x),y:pageH-(o.y+o.h)/1.5,width:toX(o.w),height:toX(o.h),rotate:rot});}}
-        }}
-      const bytes=await doc.save();const base=(state.file?.name||'document.pdf').replace(/\.pdf$/i,'')||'document';createDownload(bytes,`${base}_annotated.pdf`,'application/pdf');toast('Annotated PDF generated.');
-    }catch(error){console.error(error);toast(`Annotation export failed: ${error.message}`,7000);}
+    try {
+      const PDFLib = await loadGlobalScript('PDFLib', 'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js');
+      const { PDFDocument, StandardFonts, rgb, degrees } = PDFLib;
+      const doc = await PDFDocument.load(state.bytes);
+      const fontRegular = await doc.embedFont(StandardFonts.Helvetica);
+      const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
+      const fontItalic = await doc.embedFont(StandardFonts.HelveticaOblique);
+      const fontBoldItalic = await doc.embedFont(StandardFonts.HelveticaBoldOblique);
+
+      for (let p = 0; p < doc.getPageCount(); p += 1) {
+        const pdfPage = doc.getPage(p);
+        const jsPage = await state.pdf.getPage(p + 1);
+        const viewport = jsPage.getViewport({ scale: 1.5, rotation: jsPage.rotate || 0 });
+        const toPdf = (point) => {
+          const [x, y] = viewport.convertToPdfPoint(point.x, point.y);
+          return { x, y };
+        };
+        const items = data.objects.get(p) || [];
+
+        for (const object of items) {
+          const color = colorRgb(object.color || '#000000', rgb);
+          const lineWidth = Math.max(0.5, Number(object.thickness || 2) / 1.5);
+          const bounds = objectBounds(object);
+          const center = { x: bounds.x + bounds.w / 2, y: bounds.y + bounds.h / 2 };
+          const rotate = (point) => rotateScreenPoint(point, center, Number(object.rotation || 0));
+          const drawSegment = (a, b, width = lineWidth) => pdfPage.drawLine({ start: toPdf(a), end: toPdf(b), thickness: width, color });
+
+          if (object.type === 'rectangle') {
+            const corners = [
+              {x:object.x,y:object.y},{x:object.x+object.w,y:object.y},
+              {x:object.x+object.w,y:object.y+object.h},{x:object.x,y:object.y+object.h}
+            ].map(rotate);
+            for (let i = 0; i < corners.length; i += 1) drawSegment(corners[i], corners[(i + 1) % corners.length]);
+          } else if (object.type === 'circle') {
+            const centerPdf = toPdf(rotate(center));
+            const xEdge = toPdf(rotate({x:center.x+object.w/2,y:center.y}));
+            const yEdge = toPdf(rotate({x:center.x,y:center.y+object.h/2}));
+            const xVector = {x:xEdge.x-centerPdf.x,y:xEdge.y-centerPdf.y};
+            const yVector = {x:yEdge.x-centerPdf.x,y:yEdge.y-centerPdf.y};
+            const angle = Math.atan2(xVector.y, xVector.x) * 180 / Math.PI;
+            pdfPage.drawEllipse({
+              x:centerPdf.x,y:centerPdf.y,
+              xScale:Math.hypot(xVector.x,xVector.y),
+              yScale:Math.hypot(yVector.x,yVector.y),
+              borderColor:color,borderWidth:lineWidth,rotate:degrees(angle)
+            });
+          } else if (object.type === 'line' || object.type === 'arrow') {
+            const startPoint = rotate({x:object.x1,y:object.y1});
+            const endPoint = rotate({x:object.x2,y:object.y2});
+            drawSegment(startPoint, endPoint);
+            if (object.type === 'arrow') {
+              const dx=endPoint.x-startPoint.x,dy=endPoint.y-startPoint.y;
+              const length=Math.max(.001,Math.hypot(dx,dy)),ux=dx/length,uy=dy/length;
+              const headLength=Math.min(length*.65,Math.max(10,Number(object.thickness||2)*5.2));
+              const headHalf=Math.max(5,Number(object.thickness||2)*2.8);
+              const bx=endPoint.x-ux*headLength,by=endPoint.y-uy*headLength;
+              const px=-uy,py=ux;
+              const points=[
+                {x:bx+px*headHalf,y:by+py*headHalf},endPoint,
+                {x:bx-px*headHalf,y:by-py*headHalf}
+              ];
+              drawSegment(points[0],points[1],Math.max(.5,lineWidth*.8));
+              drawSegment(points[1],points[2],Math.max(.5,lineWidth*.8));
+            }
+          } else if (object.type === 'pen') {
+            const points=object.points.map(rotate);
+            for(let i=1;i<points.length;i+=1)drawSegment(points[i-1],points[i]);
+          } else if (object.type === 'text') {
+            const font=object.bold&&object.italic?fontBoldItalic:object.bold?fontBold:object.italic?fontItalic:fontRegular;
+            const fontSize=Math.max(4,Number(object.fontSize||18)/1.5);
+            const baselineDisplay=rotate({x:object.x,y:object.y+Number(object.fontSize||18)});
+            const baseline=toPdf(baselineDisplay);
+            const directionPoint=toPdf(rotate({x:object.x+10,y:object.y+Number(object.fontSize||18)}));
+            const angle=Math.atan2(directionPoint.y-baseline.y,directionPoint.x-baseline.x)*180/Math.PI;
+            pdfPage.drawText(String(object.text||''),{x:baseline.x,y:baseline.y,size:fontSize,font,color,rotate:degrees(angle),lineHeight:fontSize*1.2});
+            if(object.underline){
+              const start=rotate({x:object.x,y:object.y+Number(object.fontSize||18)+2});
+              const end=rotate({x:object.x+Math.max(Number(object.w||0),font.widthOfTextAtSize(String(object.text||''),fontSize)*1.5),y:object.y+Number(object.fontSize||18)+2});
+              drawSegment(start,end,Math.max(.5,lineWidth*.45));
+            }
+          } else if (object.type === 'image') {
+            const asset=data.images.get(object.assetId);
+            if(asset){
+              const image=await doc.embedPng(dataUrlToBytes(asset.dataUrl));
+              const centerPdf=toPdf(rotate(center));
+              const xEdge=toPdf(rotate({x:center.x+object.w/2,y:center.y}));
+              const yEdge=toPdf(rotate({x:center.x,y:center.y+object.h/2}));
+              const vx={x:xEdge.x-centerPdf.x,y:xEdge.y-centerPdf.y};
+              const vy={x:yEdge.x-centerPdf.x,y:yEdge.y-centerPdf.y};
+              const width=Math.max(1,Math.hypot(vx.x,vx.y)*2);
+              const height=Math.max(1,Math.hypot(vy.x,vy.y)*2);
+              const angle=Math.atan2(vx.y,vx.x);
+              // drawImage rotates around its local lower-left origin. Offset
+              // that origin so the transformed image remains centred correctly.
+              const halfX=width/2,halfY=height/2;
+              const origin={
+                x:centerPdf.x-(halfX*Math.cos(angle)-halfY*Math.sin(angle)),
+                y:centerPdf.y-(halfX*Math.sin(angle)+halfY*Math.cos(angle))
+              };
+              pdfPage.drawImage(image,{x:origin.x,y:origin.y,width,height,rotate:degrees(angle*180/Math.PI)});
+            }
+          }
+        }
+      }
+      const bytes=await doc.save();
+      const base=(state.file?.name||'document.pdf').replace(/\.pdf$/i,'')||'document';
+      createDownload(bytes,`${base}_annotated.pdf`,'application/pdf');
+      toast('Annotated PDF generated.');
+    } catch(error) { console.error(error); toast(`Annotation export failed: ${error.message}`,7000); }
   }
   draw();
 }

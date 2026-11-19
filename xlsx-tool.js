@@ -63,7 +63,7 @@ export async function renderXlsx() {
     const rect = ruler.getBoundingClientRect(); const x = Math.max(0, Math.min(rendered.canvas.width - 1, Math.round(event.clientX - rect.left)));
     columns.set(page, toggleColumn(columns.get(page), x)); redrawLines(); updateList();
   });
-  const note = document.createElement('p'); note.className = 'xlsx-note'; note.textContent = `Page ${page + 1}: click the ruler to add/remove boundaries, or drag a blue boundary to reposition it. Pages without selectable text will use PaddleOCR automatically.`; left.append(note);
+  const note = document.createElement('p'); note.className = 'xlsx-note'; note.textContent = `Page ${page + 1}: click the ruler to add/remove boundaries, or drag a blue boundary to reposition it. Pages without selectable text will use Tesseract.js automatically.`; left.append(note);
   const docHeading = document.createElement('div'); docHeading.className = 'panel-heading'; docHeading.textContent = 'Document Status'; right.append(docHeading);
   const docRows = [];
   for (let p = 0; p < state.pageCount; p++) { const row = document.createElement('div'); row.className = 'page-status'; row.textContent = `Page ${p + 1}: ${(columns.get(p) || []).length} column marker${(columns.get(p) || []).length === 1 ? '' : 's'}`; right.append(row); docRows.push(row); }
@@ -78,7 +78,7 @@ export async function renderXlsx() {
       const output = await generateWorkbook(state.pdf, columns, (message) => { progress.textContent = message; });
       createDownload(output.bytes, 'extracted.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       const details = [];
-      if (output.usedOcrPages.length) details.push(`PaddleOCR was used on page(s): ${output.usedOcrPages.join(', ')}.`);
+      if (output.usedOcrPages.length) details.push(`Tesseract.js was used on page(s): ${output.usedOcrPages.join(', ')}.`);
       else details.push('The XLSX was generated from the PDF text layer; OCR was not needed.');
       if (output.blankRecovered) details.push(`Targeted OCR recovered ${output.blankRecovered} previously blank cell(s).`);
       if (output.numericCorrected) details.push(`Numeric validation corrected ${output.numericCorrected} suspicious cell(s).`);

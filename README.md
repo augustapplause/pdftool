@@ -1,51 +1,60 @@
-# PDF Tools v1.0.1 — flat GitHub Pages edition
+# PDF Tools v1.0.3 — flat GitHub Pages edition
 
-This release is arranged so **every project file is in the repository root**. There are no required folders, no build step, no package installation, and no GitHub Actions workflow.
+This is a browser-only PDF utility app designed to be hosted as a static site on GitHub Pages. **Every required project file is in this repository root.** Do not create `src`, `public`, `assets`, `.github`, or other folders.
 
-## Files
+## Deploy to GitHub Pages
 
-Upload every file in this ZIP directly into the top level of your GitHub repository. Do not create `src`, `public`, `assets`, `.github`, or any other folders.
-
-## Publish with GitHub Pages
-
-1. Create or open your GitHub repository.
-2. Upload all files from this ZIP into the repository's root (the same level as `index.html`).
+1. Extract this ZIP.
+2. Upload every file inside it directly to the top level of your GitHub repository (the same level as `index.html`).
 3. Commit the files to the `main` branch.
 4. Open **Settings → Pages**.
-5. Under **Build and deployment**, choose **Deploy from a branch**.
-6. Select branch **main** and folder **/(root)**, then Save.
-7. Open the Pages URL shown by GitHub after deployment.
+5. Under **Build and deployment**, select **Deploy from a branch**.
+6. Select branch **main** and folder **/(root)**, then save.
+7. Open the Pages URL shown by GitHub.
 
-No npm, Node.js, GitHub Actions, build command, or nested folder is required.
+No npm, Node.js, build step, backend, or GitHub Actions workflow is required.
 
 ## Included tools
 
-- Redact PDF
-- Convert PDF to XLSX, including per-page draggable column boundaries and PaddleOCR fallback
-- Convert PDF to Plain Text
-- Rotate PDF
-- Annotate PDF
-- Split PDF
+- Redact PDF — draws the selected redaction areas into rasterized replacement pages before export. This removes the covered original content, but the exported pages are raster images and their text is no longer selectable.
+- Convert PDF to XLSX — click the ruler to add/remove boundaries, or drag blue boundary lines to reposition them. Boundaries are stored independently by page. Selectable PDF text is extracted first; image-only pages use Tesseract.js 7. English and French language data is included. The converter includes targeted blank-cell OCR, numeric validation, and decimal-recovery heuristics.
+- Convert PDF to Plain Text — extracts selectable text from all pages. Scanned pages are not OCR'd in this tool.
+- Rotate PDF — rotate individual pages in 90-degree increments and export the document.
+- Annotate PDF — add and manipulate text, images, shapes, lines, arrows, and pen marks; set colour and thickness; remove a selected image background colour; and export the annotated document.
+- Split PDF — select pages, reorder the output sequence, and export the selected pages.
 
-## Local-only document handling
+## Local document privacy
 
-The selected PDF is read through the browser File API and processed in the user's browser tab. The application contains no application-server upload endpoint and does not send PDF contents to the third-party module CDNs. Third-party JavaScript libraries and OCR model/runtime assets may be downloaded by the browser from their pinned CDN locations; those downloads do not contain the user's PDF. Do not add analytics, telemetry, or remote document-processing integrations without revisiting this privacy promise.
+The selected PDF is read with the browser File API and processed in the browser tab. The application does not send the PDF or extracted document content to a server or OCR service. Generated files are created in browser memory and downloaded from a local Blob URL.
 
-## Browser dependencies
+This is not an air-gapped application: the browser downloads pinned JavaScript libraries and the Tesseract.js worker/WASM runtime from public CDNs. Those requests do not include the user's PDF. English and French Tesseract traineddata files are included in this ZIP and loaded from the same GitHub Pages origin as the application. No analytics or telemetry is included.
 
-To allow deployment as a flat static site without a build step, the app imports these pinned libraries from CDNs:
+## Runtime libraries
 
-- PDF.js 6.5.438 and its matching worker from jsDelivr
-- pdf-lib 1.17.1 from esm.sh
-- SheetJS/XLSX 0.18.5 from esm.sh
-- PaddleOCR.js 0.4.2 from esm.sh; its model/runtime may fetch additional assets when OCR is first used
+The application is a no-build static site and loads the following pinned libraries at runtime:
 
-An internet connection is required to load these libraries and OCR resources. Once loaded, document processing runs locally in the browser. A fully offline deployment would require separately copying and configuring all library, worker, WASM, and OCR model assets; that is not part of this flat-root build.
+- PDF.js 6.5.438 and its matching worker from jsDelivr.
+- pdf-lib 1.17.1 from jsDelivr.
+- SheetJS 0.20.3 from its official CDN distribution.
+- Tesseract.js 7.0.0 and tesseract.js-core 7.0.0 from jsDelivr. The Tesseract.js worker is created through its Blob-worker mechanism to avoid a direct cross-origin Worker constructor. The worker and WASM runtime are CDN-hosted; `eng.traineddata.gz` and `fra.traineddata.gz` are local root files.
 
-## Validation notes
+An internet connection is required to load these runtime libraries and the OCR worker/WASM files. Once loaded, document processing takes place locally. A fully offline deployment would require separately downloading and self-hosting the JS libraries, PDF.js worker, Tesseract worker, and every compatible Tesseract core/WASM build; that is not included here.
 
-This is a static-root restructuring of the v1.0.0 first implementation. All JavaScript modules and the stylesheet are at the repository root, and local imports have been rewritten accordingly. The browser loads dependency modules from pinned CDN URLs. A production browser integration run against real sample PDFs is still required, especially for PaddleOCR initialization, large documents, and complex annotation exports. The redaction export rasterizes pages to remove obscured original content, with the trade-off that text/vector content on those pages is no longer selectable.
+## Browser and performance notes
 
-## Versioning
+Use a current Chromium-based browser or Firefox. The app uses ES modules, WebAssembly, Canvas, Blob URLs, `createImageBitmap`, and browser file-download APIs. OCR and PDF processing can be memory-intensive, particularly for large scanned documents. Tesseract uses a Web Worker so recognition should not block the main UI thread, but initial runtime/model loading can take time. The language data is cached by Tesseract.js after its first successful load.
 
-Visible application version and source version: **1.0.1**.
+The PDF-to-XLSX converter maps native text items to word positions using measured browser font metrics. This is more precise than assigning text by character count, but remains an approximation of the original PyMuPDF word boxes and must be validated against real PDFs, especially where text sits close to a column boundary.
+
+Annotation export uses PDF.js page viewports to map editor coordinates back to PDF coordinates, including pre-rotated pages. Complex source PDFs and rotated image annotations still require visual verification. The redaction export intentionally rasterizes every page to ensure obscured content is not retained underneath a black overlay.
+
+## Validation status
+
+- All JavaScript files pass Node syntax checks.
+- The English and French `.traineddata.gz` files are included in the repository root and pass gzip integrity checks.
+- The ZIP is intended to contain root-level files only; no nested folders are required.
+- A full live-browser integration run against public CDN dependencies and representative PDFs has **not** been completed in the build environment. The first live deployment should therefore be treated as a test release, particularly for Tesseract initialization, model loading, XLSX accuracy, PDF export, and large-document memory use.
+
+## Version
+
+Application version: **1.0.3**.

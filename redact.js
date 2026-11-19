@@ -47,21 +47,10 @@ export async function renderRedact() {
   right.append(status(data.first.has(page) ? 'First corner selected. Click the opposite corner.' : 'Ready for redaction markup.'));
   right.append(button('Generate Redacted PDF', async () => {
     try {
-      toast('Applying permanent redactions...');
-      const images = new Map();
-      for (let p = 0; p < state.pageCount; p++) {
-        const render = await renderPage(state.pdf, p, 2, 0);
-        const boxes = data.boxes.get(p) || [];
-        if (boxes.length) {
-          const ctx = render.canvas.getContext('2d'); ctx.fillStyle = '#000000';
-          const factor = 2 / 1.5;
-          boxes.forEach((b) => ctx.fillRect(b.x * factor, b.y * factor, b.w * factor, b.h * factor));
-        }
-        images.set(p, render.canvas);
-      }
-      const bytes = await makeRasterPdf(state.pdf, images);
+      toast('Applying permanent redactions page by page...');
+      const bytes = await makeRasterPdf(state.pdf, data.boxes, 1.5, 2);
       createDownload(bytes, 'redacted.pdf', 'application/pdf');
-      toast('Redacted PDF generated. The output is rasterized so covered content is no longer recoverable.');
+      toast('Redacted PDF generated. Pages are rasterized so covered content is no longer recoverable.');
     } catch (error) { console.error(error); toast(`Could not generate redacted PDF: ${error.message}`); }
   }, 'primary'));
   draw(); updateStatus();
