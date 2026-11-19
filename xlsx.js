@@ -2,10 +2,15 @@ import { loadGlobalScript } from './vendor.js';
 import { renderPage, getNativeWords } from './pdf.js';
 import { recognizeCanvas } from './ocr.js';
 
-const OCR_ZOOM = 5.5;
-const FIRST_PASS_MIN_CONFIDENCE = 10; // Matches the supplied Python implementation.
+// These values mirror the supplied Streamlit/PyMuPDF implementation.
+const FIRST_PASS_ZOOM = 4.0;
+const RECOVERY_ZOOM = 5.0;
+const NATIVE_ROW_TOLERANCE = 4.0;
+const OCR_ROW_TOLERANCE = 6.0;
+const FIRST_PASS_MIN_CONFIDENCE = 10;
+
+// Additional review thresholds are diagnostics only; they never modify cells.
 const LOW_CONFIDENCE_REVIEW = 45;
-const MIN_RECHECK_CONFIDENCE = 35;
 
 export function toggleColumn(columns, x, tolerance = 10) {
   const found = columns.findIndex((value) => Math.abs(value - x) <= tolerance);
@@ -20,128 +25,77 @@ function median(values) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
-/** Grayscale histogram autocontrast with a tiny 0.1% trim to ignore isolated scan speckles. */
-function makeAutocontrastCanvas(source, enlargement = 1, border = 16, thresholdMode = 'none') {
-  const scaledWidth = Math.max(1, Math.ceil(source.width * enlargement));
-  const scaledHeight = Math.max(1, Math.ceil(source.height * enlargement));
-  const work = document.createElement('canvas');
-  work.width = scaledWidth;
-  work.height = scaledHeight;
-  const workCtx = work.getContext('2d', { willReadFrequently: true });
-  workCtx.imageSmoothingEnabled = true;
-  workCtx.imageSmoothingQuality = 'high';
-  workCtx.drawImage(source, 0, 0, scaledWidth, scaledHeight);
+/** Browser equivalent of the Python sequence: grayscale -> ImageOps.autocontrast -> LANCZOS resize -> white border. */
+function makeAutocontrastCanvas(source, enlargement = 1, border = 16, binary = false) {
+  const gray = document.createElement('canvas');
+  gray.width = Math.max(1, source.width);
+  gray.height = Math.max(1, source.height);
+  const grayContext = gray.getContext('2d', { willReadFrequently: true });
+  grayContext.drawImage(source, 0, 0);
 
-  const image = workCtx.getImageData(0, 0, scaledWidth, scaledHeight);
-  const data = image.data;
+  const image = grayContext.getImageData(0, 0, gray.width, gray.height);
+  const pixels = image.data;
   const histogram = new Uint32Array(256);
-  let min = 255, max = 0;
-  for (let i = 0; i < data.length; i += 4) {
-    const gray = Math.round(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
-    data[i] = gray; data[i + 1] = gray; data[i + 2] = gray;
-    histogram[gray] += 1;
-    if (gray < min) min = gray;
-    if (gray > max) max = gray;
+  let low = 255;
+  let high = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    const value = Math.max(0, Math.min(255, Math.round(
+      pixels[i] * 0.299 + pixels[i + 1] * 0.587 + pixels[i + 2] * 0.114
+    )));
+    pixels[i] = value;
+    pixels[i + 1] = value;
+    pixels[i + 2] = value;
+    histogram[value] += 1;
+    if (value < low) low = value;
+    if (value > high) high = value;
   }
-  // Ignore only extreme isolated speckles while retaining the original content range.
-  const total = scaledWidth * scaledHeight;
-  const clip = Math.floor(total * 0.001);
-  let cumulative = 0, low = 0, high = 255;
-  for (let i = 0; i < 256; i += 1) { cumulative += histogram[i]; if (cumulative > clip) { low = i; break; } }
-  cumulative = 0;
-  for (let i = 255; i >= 0; i -= 1) { cumulative += histogram[i]; if (cumulative > clip) { high = i; break; } }
-  if (high <= low) { low = min; high = max; }
-  const span = Math.max(1, high - low);
-  for (let i = 0; i < data.length; i += 4) {
-    let gray = Math.max(0, Math.min(255, Math.round((data[i] - low) * 255 / span)));
-    if (thresholdMode === 'global') gray = gray > 175 ? 255 : 0;
-    data[i] = gray; data[i + 1] = gray; data[i + 2] = gray; data[i + 3] = 255;
-  }
-  workCtx.putImageData(image, 0, 0);
 
-  if (thresholdMode === 'adaptive') applyAdaptiveThreshold(workCtx, scaledWidth, scaledHeight);
+  // ImageOps.autocontrast defaults to cutoff=0, so use the full observed range.
+  const range = Math.max(1, high - low);
+  for (let i = 0; i < pixels.length; i += 4) {
+    const value = Math.max(0, Math.min(255, Math.round((pixels[i] - low) * 255 / range)));
+    pixels[i] = value;
+    pixels[i + 1] = value;
+    pixels[i + 2] = value;
+    pixels[i + 3] = 255;
+  }
+  grayContext.putImageData(image, 0, 0);
+
+  const scaledWidth = Math.max(1, Math.round(gray.width * enlargement));
+  const scaledHeight = Math.max(1, Math.round(gray.height * enlargement));
+  const enlarged = document.createElement('canvas');
+  enlarged.width = scaledWidth;
+  enlarged.height = scaledHeight;
+  const enlargedContext = enlarged.getContext('2d', { willReadFrequently: binary });
+  enlargedContext.imageSmoothingEnabled = true;
+  enlargedContext.imageSmoothingQuality = 'high';
+  enlargedContext.drawImage(gray, 0, 0, scaledWidth, scaledHeight);
+  gray.width = 1;
+  gray.height = 1;
+
+  if (binary) {
+    const enlargedImage = enlargedContext.getImageData(0, 0, scaledWidth, scaledHeight);
+    const enlargedPixels = enlargedImage.data;
+    for (let i = 0; i < enlargedPixels.length; i += 4) {
+      const value = enlargedPixels[i] > 175 ? 255 : 0;
+      enlargedPixels[i] = value;
+      enlargedPixels[i + 1] = value;
+      enlargedPixels[i + 2] = value;
+      enlargedPixels[i + 3] = 255;
+    }
+    enlargedContext.putImageData(enlargedImage, 0, 0);
+  }
 
   const output = document.createElement('canvas');
   output.width = scaledWidth + border * 2;
   output.height = scaledHeight + border * 2;
-  const out = output.getContext('2d');
-  out.fillStyle = '#ffffff'; out.fillRect(0, 0, output.width, output.height);
-  out.drawImage(work, border, border);
-  work.width = 1; work.height = 1;
+  const outputContext = output.getContext('2d');
+  outputContext.fillStyle = '#ffffff';
+  outputContext.fillRect(0, 0, output.width, output.height);
+  outputContext.drawImage(enlarged, border, border);
+  enlarged.width = 1;
+  enlarged.height = 1;
   return { canvas: output, enlargement, border };
-}
-
-/** Bradley-style local thresholding for difficult cell crops; never used as the sole first pass. */
-function applyAdaptiveThreshold(ctx, width, height) {
-  const image = ctx.getImageData(0, 0, width, height);
-  const src = image.data;
-  const stride = width + 1;
-  const integral = new Float64Array((width + 1) * (height + 1));
-  for (let y = 1; y <= height; y += 1) {
-    let rowSum = 0;
-    for (let x = 1; x <= width; x += 1) {
-      rowSum += src[((y - 1) * width + x - 1) * 4];
-      integral[y * stride + x] = integral[(y - 1) * stride + x] + rowSum;
-    }
-  }
-  const radius = Math.max(8, Math.round(Math.min(width, height) * 0.09));
-  for (let y = 0; y < height; y += 1) {
-    const y0 = Math.max(0, y - radius), y1 = Math.min(height, y + radius + 1);
-    for (let x = 0; x < width; x += 1) {
-      const x0 = Math.max(0, x - radius), x1 = Math.min(width, x + radius + 1);
-      const sum = integral[y1 * stride + x1] - integral[y0 * stride + x1] - integral[y1 * stride + x0] + integral[y0 * stride + x0];
-      const mean = sum / ((x1 - x0) * (y1 - y0));
-      const index = (y * width + x) * 4;
-      const value = src[index] < mean * 0.92 ? 0 : 255;
-      src[index] = value; src[index + 1] = value; src[index + 2] = value; src[index + 3] = 255;
-    }
-  }
-  ctx.putImageData(image, 0, 0);
-}
-
-function parseNumeric(value) {
-  let text = String(value ?? '').trim().replace(/\s+/g, '').replace(/,/g, '');
-  if (!text || /[A-Za-z]/.test(text)) return null;
-  if (text.startsWith('=') || text.startsWith('|')) text = text.slice(1);
-  let negative = false;
-  if (text.startsWith('(') && text.endsWith(')')) { negative = true; text = text.slice(1, -1); }
-  const percent = text.endsWith('%');
-  if (percent) text = text.slice(0, -1);
-  text = text.replace(/^[$€£¥]/, '');
-  if (!/^-?(?:\d+(?:\.\d+)?|\.\d+)$/.test(text)) return null;
-  let number = Number(text) * (negative ? -1 : 1);
-  if (percent) number /= 100;
-  return Number.isFinite(number) ? number : null;
-}
-
-function looksNumeric(value) { return parseNumeric(value) != null; }
-
-function cleanOcrArtifact(value) {
-  if (value == null || typeof value !== 'string') return value;
-  const text = value.trim();
-  if (!text) return value;
-  // Remove a leading OCR punctuation artefact only when the remainder is a valid numeric token.
-  if (/^[=|][\s]*/.test(text)) {
-    const candidate = text.replace(/^[=|][\s]*/, '');
-    if (looksNumeric(candidate)) return candidate;
-  }
-  return text;
-}
-
-function cleanNumeric(value) {
-  if (value == null || typeof value === 'number') return value;
-  const text = cleanOcrArtifact(value);
-  if (typeof text !== 'string' || !text.trim()) return value;
-  if (/[A-Za-z]/.test(text) || /\d{1,4}[-/]\d{1,2}[-/]\d{1,4}/.test(text) || /\d+\s*-\s*\d+/.test(text)) return text;
-  let cleaned = text.trim(), negative = false, percent = false;
-  if (cleaned.startsWith('(') && cleaned.endsWith(')')) { negative = true; cleaned = cleaned.slice(1, -1).trim(); }
-  cleaned = cleaned.replace(/[,$€£¥]/g, '').trim();
-  if (cleaned.endsWith('%')) { percent = true; cleaned = cleaned.slice(0, -1).trim(); }
-  if (cleaned.startsWith('-')) { negative = true; cleaned = cleaned.slice(1).trim(); }
-  if (!/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(cleaned)) return text;
-  let number = Number(cleaned) * (negative ? -1 : 1);
-  if (percent) number /= 100;
-  return Number.isInteger(number) && !percent && !cleaned.includes('.') ? number : number;
 }
 
 function makeColumnCrop(pageCanvas, pixelLeft, pixelRight) {
@@ -153,139 +107,428 @@ function makeColumnCrop(pageCanvas, pixelLeft, pixelRight) {
   return crop;
 }
 
-function groupWords(words, tolerance = 4.0) {
+/** Match Python group_words_into_rows: sort by y0/x0, first matching row wins,
+ * then update its centre using the same pairwise averaging operation. */
+function groupWordsIntoRows(words, yTolerance = 4) {
   const rows = [];
-  const sorted = [...words].sort((a, b) => ((a.y0 + a.y1) / 2) - ((b.y0 + b.y1) / 2) || a.x0 - b.x0);
+  const sorted = [...words].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
   for (const word of sorted) {
-    const mid = (word.y0 + word.y1) / 2;
-    let best = null, bestDistance = Infinity;
+    const yMid = (word.y0 + word.y1) / 2;
+    let placed = false;
     for (const row of rows) {
-      const distance = Math.abs(row.anchor - mid);
-      // A fixed anchor/median avoids cumulative drift as words from many columns are added.
-      if (distance <= tolerance && distance < bestDistance) { best = row; bestDistance = distance; }
-    }
-    if (!best) { best = { ys: [], words: [], anchor: mid }; rows.push(best); }
-    best.ys.push(mid); best.words.push(word); best.anchor = median(best.ys);
-  }
-  return rows.sort((a, b) => a.anchor - b.anchor).map((row) => ({ y: row.anchor, words: row.words }));
-}
-
-function assembleRows(words, boundaries, tolerance = 4.0) {
-  const grouped = groupWords(words, tolerance);
-  const table = [], centres = [], confidences = [];
-  for (const row of grouped) {
-    const cells = Array(Math.max(0, boundaries.length - 1)).fill('');
-    const cellScores = cells.map(() => []);
-    for (const word of [...row.words].sort((a, b) => a.x0 - b.x0)) {
-      const mid = (word.x0 + word.x1) / 2;
-      const col = boundaries.findIndex((left, i) => i < boundaries.length - 1 && left <= mid && mid < boundaries[i + 1]);
-      if (col >= 0) {
-        cells[col] = `${cells[col]} ${word.text}`.trim();
-        if (Number.isFinite(word.confidence)) cellScores[col].push(word.confidence);
-        else cellScores[col].push(100);
+      if (Math.abs(row.y - yMid) <= yTolerance) {
+        row.words.push(word);
+        row.y = (row.y + yMid) / 2;
+        placed = true;
+        break;
       }
     }
+    if (!placed) rows.push({ y: yMid, words: [word] });
+  }
+  return rows;
+}
+
+function assignWordToColumn(word, boundaries) {
+  const xMid = (word.x0 + word.x1) / 2;
+  for (let i = 0; i < boundaries.length - 1; i += 1) {
+    if (boundaries[i] <= xMid && xMid < boundaries[i + 1]) return i;
+  }
+  return null;
+}
+
+function buildTableRowsWithGeometry(words, boundaries, yTolerance) {
+  const groupedRows = groupWordsIntoRows(words, yTolerance);
+  const tableRows = [];
+  const rowCentres = [];
+  const rowConfidences = [];
+
+  for (const grouped of groupedRows) {
+    const cells = Array(boundaries.length - 1).fill('');
+    const cellScores = cells.map(() => []);
+    for (const word of [...grouped.words].sort((a, b) => a.x0 - b.x0)) {
+      const columnIndex = assignWordToColumn(word, boundaries);
+      if (columnIndex == null) continue;
+      cells[columnIndex] = `${cells[columnIndex]} ${word.text}`.trim();
+      if (Number.isFinite(word.confidence)) cellScores[columnIndex].push(word.confidence);
+    }
     if (cells.some((cell) => cell.trim())) {
-      table.push(cells);
-      centres.push(row.y);
-      confidences.push(cellScores.map((scores) => scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : null));
+      tableRows.push(cells);
+      rowCentres.push(Number(grouped.y));
+      rowConfidences.push(cellScores.map((scores) => scores.length
+        ? scores.reduce((sum, score) => sum + score, 0) / scores.length
+        : null));
     }
   }
-  return { rows: table, centres, confidences };
+  return { rows: tableRows, centres: rowCentres, confidences: rowConfidences };
 }
 
-function numericColumns(rows) {
-  const result = new Set();
-  const width = Math.max(0, ...rows.map((row) => row.length));
-  for (let col = 0; col < width; col += 1) {
-    const values = rows.map((row) => String(row[col] ?? '').trim()).filter(Boolean);
-    if (values.length >= 2 && values.filter(looksNumeric).length / values.length >= 0.55) result.add(col);
+function looksNumericOcr(value) {
+  let text = String(value ?? '').trim();
+  if (!text) return false;
+  text = text.replace(/ /g, '').replace(/\$/g, '').replace(/€/g, '').replace(/£/g, '');
+  return /^\(?-?\d[\d,]*(?:\.\d+)?%?\)?$/.test(text);
+}
+
+function numericColumns(tableRows) {
+  if (!tableRows.length) return new Set();
+  const numeric = new Set();
+  const width = Math.max(...tableRows.map((row) => row.length));
+  for (let columnIndex = 0; columnIndex < width; columnIndex += 1) {
+    const values = tableRows
+      .filter((row) => columnIndex < row.length && String(row[columnIndex] ?? '').trim())
+      .map((row) => String(row[columnIndex]).trim());
+    if (values.length >= 2 && values.filter(looksNumericOcr).length / values.length >= 0.55) numeric.add(columnIndex);
   }
-  return result;
+  return numeric;
 }
 
-function inferDecimalPlaces(rows) {
-  const result = new Map();
-  const width = Math.max(0, ...rows.map((row) => row.length));
-  for (let col = 0; col < width; col += 1) {
-    const counts = new Map(); let total = 0;
-    for (const row of rows) {
-      const text = String(row[col] ?? '').replace(/,/g, '').trim();
-      const match = text.match(/^\(?-?\d+\.(\d+)%?\)?$/);
-      if (match) { const places = match[1].length; counts.set(places, (counts.get(places) || 0) + 1); total += 1; }
-    }
-    if (total >= 4) {
-      const [places, count] = [...counts].sort((a, b) => b[1] - a[1])[0];
-      if (count / total >= 0.7) result.set(col, places);
-    }
+function createOcrPageCache(renderedCanvas, pageWidth, pageHeight) {
+  return {
+    canvas: renderedCanvas,
+    scaleX: renderedCanvas.width / pageWidth,
+    scaleY: renderedCanvas.height / pageHeight,
+    crops: new Map()
+  };
+}
+
+function getCachedOcrCrop(cache, box) {
+  const key = box.map((value) => Math.trunc(value)).join(',');
+  let crop = cache.crops.get(key);
+  if (!crop) {
+    const [left, top, right, bottom] = box.map((value) => Math.trunc(value));
+    crop = document.createElement('canvas');
+    crop.width = Math.max(1, right - left);
+    crop.height = Math.max(1, bottom - top);
+    crop.getContext('2d').drawImage(
+      cache.canvas, left, top, crop.width, crop.height, 0, 0, crop.width, crop.height
+    );
+    cache.crops.set(key, crop);
   }
-  return result;
+  return crop;
 }
 
-function decimalReferences(rows, col) {
-  return rows.map((row) => parseNumeric(row[col])).filter((value) => value != null && Math.abs(value) > 0).map(Math.abs);
+function closeOcrPageCache(cache) {
+  if (!cache) return;
+  for (const crop of cache.crops.values()) {
+    crop.width = 1;
+    crop.height = 1;
+  }
+  cache.crops.clear();
+  if (cache.canvas) {
+    cache.canvas.width = 1;
+    cache.canvas.height = 1;
+  }
 }
 
-function repairMissingDecimal(rawValue, decimalPlaces, references) {
-  const text = String(rawValue ?? '').replace(/,/g, '').trim();
-  if (!/^\d+$/.test(text) || text.length <= decimalPlaces || text.length < decimalPlaces + 1 || references.length < 4) return '';
-  const proposed = `${text.slice(0, -decimalPlaces)}.${text.slice(-decimalPlaces)}`;
-  const sorted = [...references].sort((a, b) => a - b);
-  const med = median(sorted), max = Math.max(...sorted), min = Math.min(...sorted);
-  const upper = Math.max(max * 5, med * 20);
-  const originalOutlier = Number(text) > upper;
-  const proposedPlausible = Number(proposed) >= min / 100 && Number(proposed) <= upper;
-  return originalOutlier && proposedPlausible ? proposed : '';
+function blankCellIsSurrounded(tableRows, rowIndex, columnIndex) {
+  const row = tableRows[rowIndex];
+  const left = columnIndex > 0 && Boolean(String(row[columnIndex - 1] ?? '').trim());
+  const right = columnIndex + 1 < row.length && Boolean(String(row[columnIndex + 1] ?? '').trim());
+  const above = rowIndex > 0 && columnIndex < tableRows[rowIndex - 1].length
+    && Boolean(String(tableRows[rowIndex - 1][columnIndex] ?? '').trim());
+  const below = rowIndex + 1 < tableRows.length && columnIndex < tableRows[rowIndex + 1].length
+    && Boolean(String(tableRows[rowIndex + 1][columnIndex] ?? '').trim());
+  return (left && right) || (above && below);
 }
 
-function rowBounds(centres, index) {
-  const current = centres[index];
-  const prev = centres[index - 1];
-  const next = centres[index + 1];
-  if (prev == null && next == null) return [Math.max(0, current - 8), current + 8];
-  const gapBefore = prev == null ? Infinity : current - prev;
-  const gapAfter = next == null ? Infinity : next - current;
-  const half = Math.max(4.5, Math.min(gapBefore, gapAfter) * 0.46);
-  return [Math.max(0, current - half), current + half];
+function rowBoundsForRecovery(rowCentres, rowIndex) {
+  const centre = rowCentres[rowIndex];
+  const previous = rowIndex > 0 ? rowCentres[rowIndex - 1] : null;
+  const next = rowIndex + 1 < rowCentres.length ? rowCentres[rowIndex + 1] : null;
+  let halfHeight;
+  if (previous == null && next == null) halfHeight = 8.0;
+  else if (previous == null) halfHeight = Math.max(5.0, (next - centre) * 0.48);
+  else if (next == null) halfHeight = Math.max(5.0, (centre - previous) * 0.48);
+  else halfHeight = Math.max(5.0, Math.min(centre - previous, next - centre) * 0.48);
+  return [Math.max(0, centre - halfHeight), centre + halfHeight];
 }
 
-function extractCandidate(words, numericOnly) {
-  let candidate = words.map((word) => word.text).join(' ').trim();
-  candidate = cleanOcrArtifact(candidate);
+function extractOcrCellCandidate(words, numericOnly) {
+  const tokens = words.map((word) => String(word.text ?? '').trim()).filter(Boolean);
+  let candidate = tokens.join(' ').trim();
+  if (!candidate) return { text: '', confidence: 0 };
   if (numericOnly) {
-    candidate = candidate.replace(/\s+/g, '');
-    if (!looksNumeric(candidate)) return { text: '', confidence: 0 };
+    candidate = candidate.replace(/ /g, '');
+    if (!looksNumericOcr(candidate)) return { text: '', confidence: 0 };
   }
-  const confidence = words.length ? words.reduce((sum, word) => sum + word.confidence, 0) / words.length : 0;
+  const confidence = words.length
+    ? words.reduce((sum, word) => sum + (Number.isFinite(word.confidence) ? word.confidence : 0), 0) / words.length
+    : 0;
   return { text: candidate, confidence };
 }
 
-async function recognizeCell(source, onProgress, numericOnly = false, expectedDecimalPlaces = null) {
+/** Port of Python _ocr_cell_candidate. Tries clean enlarged OCR first, then
+ * thresholded OCR only if the first pass does not yield a strong candidate. */
+async function ocrCellCandidate(source, onProgress, numericOnly, expectedDecimalPlaces = null) {
   const whitelist = numericOnly ? '0123456789.,()%-$' : '';
-  const variants = [];
+  const configs = [7, 8, 13];
   const candidates = [];
+  const variants = [
+    makeAutocontrastCanvas(source, 4, 24, false),
+    null
+  ];
+
   try {
-    variants.push(makeAutocontrastCanvas(source, 4, 24, 'none'));
-    variants.push(makeAutocontrastCanvas(source, 4, 24, 'adaptive'));
-    for (const variant of variants) {
-      for (const psm of [7, 8, 13]) {
-        const words = await recognizeCanvas(variant.canvas, onProgress, { psm, whitelist, minConfidence: 0 });
-        const found = extractCandidate(words, numericOnly);
+    for (let variantIndex = 0; variantIndex < 2; variantIndex += 1) {
+      if (variantIndex === 1) variants[1] = makeAutocontrastCanvas(source, 4, 24, true);
+      const variant = variants[variantIndex];
+      for (const psm of configs) {
+        const words = await recognizeCanvas(variant.canvas, onProgress, {
+          psm,
+          whitelist,
+          minConfidence: 0
+        });
+        const found = extractOcrCellCandidate(words, numericOnly);
         if (!found.text) continue;
+
         let score = found.confidence;
         let exactDecimal = false;
+        if (numericOnly && /\d/.test(found.text)) score += 8;
         if (numericOnly && expectedDecimalPlaces != null) {
-          exactDecimal = new RegExp(`^\\(?-?\\d[\\d,]*\\.\\d{${expectedDecimalPlaces}}%?\\)?$`).test(found.text);
-          if (exactDecimal) score += 25;
+          const pattern = new RegExp(`^\\(?-?\\d[\\d,]*\\.\\d{${expectedDecimalPlaces}}%?\\)?$`);
+          exactDecimal = pattern.test(found.text);
+          if (exactDecimal) score += 30;
+          else if (!found.text.includes('.') && /^\d{5,}$/.test(found.text)) score -= 10;
+        }
+
+        if ((exactDecimal && score >= 75)
+          || (expectedDecimalPlaces == null && score >= 82)) {
+          return { ...found, score, exactDecimal };
         }
         candidates.push({ ...found, score, exactDecimal });
       }
     }
-    candidates.sort((a, b) => b.score - a.score || b.confidence - a.confidence);
-    return candidates[0] || { text: '', confidence: 0, score: 0, exactDecimal: false };
   } finally {
-    for (const variant of variants) { variant.canvas.width = 1; variant.canvas.height = 1; }
+    for (const variant of variants) {
+      if (variant?.canvas) {
+        variant.canvas.width = 1;
+        variant.canvas.height = 1;
+      }
+    }
   }
+
+  candidates.sort((a, b) => b.score - a.score || b.text.length - a.text.length);
+  return candidates[0] || { text: '', confidence: 0, score: 0, exactDecimal: false };
+}
+
+async function recoverBlankOcrCells(cache, boundaries, tableRows, rowCentres, onProgress, pageNumber) {
+  if (!tableRows.length || !rowCentres.length) return 0;
+  const numeric = numericColumns(tableRows);
+  let recovered = 0;
+
+  for (let rowIndex = 0; rowIndex < tableRows.length; rowIndex += 1) {
+    const row = tableRows[rowIndex];
+    const populated = row.filter((cell) => Boolean(String(cell ?? '').trim())).length;
+    if (populated < 3) continue;
+    const [topPdf, bottomPdf] = rowBoundsForRecovery(rowCentres, rowIndex);
+
+    for (let columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
+      if (String(row[columnIndex] ?? '').trim()) continue;
+      if (!blankCellIsSurrounded(tableRows, rowIndex, columnIndex)) continue;
+      if (columnIndex === 0 && !numeric.has(columnIndex)) continue;
+
+      const leftPdf = Math.max(0, boundaries[columnIndex] - 2.0);
+      const rightPdf = Math.min(cache.canvas.width / cache.scaleX, boundaries[columnIndex + 1] + 2.0);
+      const cropBox = [
+        Math.max(0, Math.round(leftPdf * cache.scaleX)),
+        Math.max(0, Math.round(topPdf * cache.scaleY)),
+        Math.min(cache.canvas.width, Math.round(rightPdf * cache.scaleX)),
+        Math.min(cache.canvas.height, Math.round(bottomPdf * cache.scaleY))
+      ];
+      if (cropBox[2] - cropBox[0] < 4 || cropBox[3] - cropBox[1] < 4) continue;
+
+      const crop = getCachedOcrCrop(cache, cropBox);
+      onProgress(`Recovering blank OCR cell: page ${pageNumber}, row ${rowIndex + 1}, column ${columnIndex + 1}...`);
+      const candidate = await ocrCellCandidate(crop, onProgress, numeric.has(columnIndex), null);
+      if (candidate.text) {
+        row[columnIndex] = candidate.text;
+        recovered += 1;
+      }
+    }
+  }
+  return recovered;
+}
+
+function normalizeOcrNumericSpacing(value) {
+  if (value == null || typeof value === 'number') return value;
+  const text = String(value).trim();
+  if (!text || /[A-Za-z]/.test(text)) return value;
+  const compact = text.replace(/\s+/g, '');
+  return looksNumericOcr(compact) ? compact : value;
+}
+
+function normalizeOcrTableValues(tableRows) {
+  for (const row of tableRows) {
+    for (let columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
+      row[columnIndex] = normalizeOcrNumericSpacing(row[columnIndex]);
+    }
+  }
+  return tableRows;
+}
+
+function inferColumnDecimalPlaces(tableRows) {
+  const result = new Map();
+  if (!tableRows.length) return result;
+  const width = Math.max(...tableRows.map((row) => row.length));
+  for (let columnIndex = 0; columnIndex < width; columnIndex += 1) {
+    const counts = new Map();
+    let decimalValues = 0;
+    for (const row of tableRows) {
+      if (columnIndex >= row.length) continue;
+      const normalized = normalizeOcrNumericSpacing(row[columnIndex]);
+      const text = String(normalized ?? '').trim().replace(/,/g, '');
+      const match = text.match(/^\(?-?\d+\.(\d+)%?\)?$/);
+      if (!match) continue;
+      const places = match[1].length;
+      counts.set(places, (counts.get(places) || 0) + 1);
+      decimalValues += 1;
+    }
+    if (decimalValues >= 4) {
+      const [places, count] = [...counts.entries()].sort((a, b) => a[1] - b[1]).pop();
+      if (count / decimalValues >= 0.70) result.set(columnIndex, places);
+    }
+  }
+  return result;
+}
+
+function columnNumericMagnitudes(tableRows, columnIndex) {
+  const values = [];
+  for (const row of tableRows) {
+    if (columnIndex >= row.length) continue;
+    let text = String(normalizeOcrNumericSpacing(row[columnIndex]) ?? '').trim()
+      .replace(/,/g, '').replace(/%/g, '');
+    if (text.startsWith('(') && text.endsWith(')')) text = `-${text.slice(1, -1)}`;
+    if (text.includes('.')) {
+      const value = Number(text);
+      if (Number.isFinite(value)) values.push(Math.abs(value));
+    }
+  }
+  return values.filter((value) => value > 0);
+}
+
+function repairMissingDecimalByColumnPattern(rawValue, decimalPlaces, referenceValues) {
+  const text = String(rawValue ?? '').trim().replace(/,/g, '');
+  if (!/^\d+$/.test(text) || text.length <= decimalPlaces) return '';
+  const proposedText = `${text.slice(0, -decimalPlaces)}.${text.slice(-decimalPlaces)}`;
+  const originalValue = Number(text);
+  const proposedValue = Number(proposedText);
+  if (!Number.isFinite(originalValue) || !Number.isFinite(proposedValue) || !referenceValues.length) return '';
+  const ordered = [...referenceValues].sort((a, b) => a - b);
+  const medianValue = median(ordered);
+  const maximum = Math.max(...ordered);
+  const minimum = Math.min(...ordered);
+  const upper = Math.max(maximum * 5, medianValue * 20);
+  const originalIsOutlier = originalValue > upper;
+  const proposedIsPlausible = proposedValue >= minimum / 100 && proposedValue <= upper;
+  return originalIsOutlier && proposedIsPlausible ? proposedText : '';
+}
+
+async function recoverSuspiciousNumericCells(cache, boundaries, tableRows, rowCentres, onProgress, pageNumber) {
+  const expectedPlaces = inferColumnDecimalPlaces(tableRows);
+  if (!expectedPlaces.size || !rowCentres.length) return 0;
+  const references = new Map([...expectedPlaces.keys()].map((columnIndex) => [
+    columnIndex,
+    columnNumericMagnitudes(tableRows, columnIndex)
+  ]));
+  let corrected = 0;
+
+  for (let rowIndex = 0; rowIndex < tableRows.length; rowIndex += 1) {
+    const row = tableRows[rowIndex];
+    const [topPdf, bottomPdf] = rowBoundsForRecovery(rowCentres, rowIndex);
+    for (const [columnIndex, places] of expectedPlaces.entries()) {
+      if (columnIndex >= row.length) continue;
+      const original = normalizeOcrNumericSpacing(row[columnIndex]);
+      const text = String(original ?? '').trim().replace(/,/g, '');
+      // Exact match to the Python implementation: only five or more digits.
+      if (!/^\d{5,}$/.test(text)) continue;
+
+      const leftPdf = Math.max(0, boundaries[columnIndex] - 2.0);
+      const rightPdf = Math.min(cache.canvas.width / cache.scaleX, boundaries[columnIndex + 1] + 2.0);
+      const cropBox = [
+        Math.max(0, Math.round(leftPdf * cache.scaleX)),
+        Math.max(0, Math.round(topPdf * cache.scaleY)),
+        Math.min(cache.canvas.width, Math.round(rightPdf * cache.scaleX)),
+        Math.min(cache.canvas.height, Math.round(bottomPdf * cache.scaleY))
+      ];
+      if (cropBox[2] - cropBox[0] < 4 || cropBox[3] - cropBox[1] < 4) continue;
+
+      const crop = getCachedOcrCrop(cache, cropBox);
+      onProgress(`Checking suspicious numeric OCR cell: page ${pageNumber}, row ${rowIndex + 1}, column ${columnIndex + 1}...`);
+      const candidate = await ocrCellCandidate(crop, onProgress, true, places);
+      const candidateText = String(normalizeOcrNumericSpacing(candidate.text) ?? '').trim().replace(/,/g, '');
+
+      const exactDecimalPattern = new RegExp(`^\\(?-?\\d+\\.\\d{${places}}%?\\)?$`);
+      if (exactDecimalPattern.test(candidateText)) {
+        row[columnIndex] = candidate.text;
+        corrected += 1;
+        continue;
+      }
+
+      const fallbackSource = /^\d+$/.test(candidateText) ? candidateText : text;
+      const repaired = repairMissingDecimalByColumnPattern(
+        fallbackSource,
+        places,
+        references.get(columnIndex) || []
+      );
+      if (repaired) {
+        row[columnIndex] = repaired;
+        corrected += 1;
+      }
+    }
+  }
+  return corrected;
+}
+
+function cleanNumericString(value) {
+  if (value == null || typeof value === 'number') return value;
+  const text = String(value).trim();
+  if (!text) return value;
+  // Match Python clean_numeric_string: preserve labels, dates, ranges and IDs.
+  if (/[A-Za-z]/.test(text)) return value;
+  if (/\d{1,4}[-/]\d{1,2}[-/]\d{1,4}/.test(text)) return value;
+  if (/\d+\s*-\s*\d+/.test(text)) return value;
+
+  let cleaned = text;
+  let negative = false;
+  if (cleaned.startsWith('(') && cleaned.endsWith(')')) {
+    negative = true;
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  cleaned = cleaned.replace(/,/g, '').replace(/\$/g, '').replace(/€/g, '').replace(/£/g, '').replace(/¥/g, '').trim();
+  let percent = false;
+  if (cleaned.endsWith('%')) {
+    percent = true;
+    cleaned = cleaned.slice(0, -1).trim();
+  }
+  if (cleaned.startsWith('-')) {
+    negative = true;
+    cleaned = cleaned.slice(1).trim();
+  }
+  if (!/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(cleaned)) return value;
+  let number = Number(cleaned);
+  if (!Number.isFinite(number)) return value;
+  if (negative) number = -number;
+  if (percent) number /= 100;
+  if (Number.isInteger(number) && !percent && !cleaned.includes('.')) return Math.trunc(number);
+  return number;
+}
+
+function numericColumnsForReview(tableRows) {
+  return numericColumns(tableRows);
+}
+
+function parseNumeric(value) {
+  const text = String(value ?? '').trim().replace(/\s+/g, '').replace(/,/g, '').replace(/[$€£]/g, '');
+  if (!text || /[A-Za-z]/.test(text)) return null;
+  let cleaned = text;
+  let negative = false;
+  if (cleaned.startsWith('(') && cleaned.endsWith(')')) { negative = true; cleaned = cleaned.slice(1, -1); }
+  const percent = cleaned.endsWith('%');
+  if (percent) cleaned = cleaned.slice(0, -1);
+  if (!/^-?(?:\d+(?:\.\d+)?|\.\d+)$/.test(cleaned)) return null;
+  let valueNumber = Number(cleaned) * (negative ? -1 : 1);
+  if (percent) valueNumber /= 100;
+  return Number.isFinite(valueNumber) ? valueNumber : null;
 }
 
 function identifyPlanSummaryProfile(rows) {
@@ -296,33 +539,39 @@ function identifyPlanSummaryProfile(rows) {
 
 function collectOcrReview(rows, confidences, numericCols, decimalPlaces, pageNumber) {
   const review = [];
-  for (let r = 0; r < rows.length; r += 1) {
-    for (let c = 0; c < rows[r].length; c += 1) {
-      const value = rows[r][c];
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    for (let columnIndex = 0; columnIndex < rows[rowIndex].length; columnIndex += 1) {
+      const value = rows[rowIndex][columnIndex];
       if (!String(value ?? '').trim()) continue;
-      const confidence = confidences[r]?.[c];
+      const confidence = confidences[rowIndex]?.[columnIndex];
       const reasons = [];
-      if (confidence != null && confidence < LOW_CONFIDENCE_REVIEW) reasons.push('Low OCR confidence');
-      if (numericCols.has(c)) {
-        const cleaned = cleanOcrArtifact(String(value));
-        if (!looksNumeric(cleaned)) reasons.push('Non-numeric OCR result in a predominantly numeric column');
-        const places = decimalPlaces.get(c);
-        const compact = String(cleaned).replace(/,/g, '').replace(/%$/, '');
+      if (confidence != null && confidence < LOW_CONFIDENCE_REVIEW) reasons.push('Low OCR confidence (diagnostic only)');
+      if (numericCols.has(columnIndex)) {
+        if (!looksNumericOcr(value)) reasons.push('Non-numeric OCR result in a predominantly numeric column');
+        const places = decimalPlaces.get(columnIndex);
+        const compact = String(value).replace(/,/g, '').replace(/%$/, '');
         if (places != null && /^\d{3,}$/.test(compact)) reasons.push(`Possible missing decimal punctuation (column pattern: ${places} decimal places)`);
       }
-      if (reasons.length) review.push({ page: pageNumber, row: r + 1, column: c + 1, value: String(value), confidence: confidence == null ? '' : Number(confidence.toFixed(1)), reason: reasons.join('; ') });
+      if (reasons.length) review.push({
+        page: pageNumber,
+        row: rowIndex + 1,
+        column: columnIndex + 1,
+        value: String(value),
+        confidence: confidence == null ? '' : Number(confidence.toFixed(1)),
+        reason: reasons.join('; ')
+      });
     }
   }
   return review;
 }
 
 function planSummaryArithmeticDiagnostics(rows, pageNumber) {
-  // This optional profile only emits warnings. It never edits or replaces source OCR values.
+  // Diagnostic only. This function never modifies rows or cell values.
   if (!identifyPlanSummaryProfile(rows)) return [];
   const warnings = [];
   const excludedLabels = /^(prior|net|grand|reversed|unadjudicated|plan summary|code|)$/i;
-  for (let r = 0; r < rows.length; r += 1) {
-    const row = rows[r];
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex];
     const code = String(row[0] ?? '').trim();
     if (!code || excludedLabels.test(code) || !/^[a-z]{2,8}$/i.test(code)) continue;
     const aac = parseNumeric(row[2]);
@@ -336,152 +585,114 @@ function planSummaryArithmeticDiagnostics(rows, pageNumber) {
     const totalCount = parseNumeric(row[13]);
     const check = (label, actual, expected, tolerance) => {
       if (actual == null || expected == null || !Number.isFinite(actual) || !Number.isFinite(expected)) return;
-      if (Math.abs(actual - expected) > tolerance) warnings.push({ page: pageNumber, row: r + 1, column: '', value: code, confidence: '', reason: `Arithmetic diagnostic only: ${label}; observed difference ${Number((actual - expected).toFixed(3))}. No cell values changed.` });
+      if (Math.abs(actual - expected) > tolerance) warnings.push({
+        page: pageNumber,
+        row: rowIndex + 1,
+        value: code,
+        reason: `Arithmetic diagnostic only: ${label}; observed difference ${Number((actual - expected).toFixed(3))}. No cell values changed.`
+      });
     };
-    if ([aac, costMarkup, effectiveMarkup].every((value) => value != null)) check('A.A.C. + effective markup vs. Cost + MkUp', costMarkup, aac + effectiveMarkup, Math.max(0.03, Math.abs(costMarkup) * 0.0001));
-    if ([costMarkup, fees, totalDollars].every((value) => value != null)) check('Cost + MkUp + Fees vs. Total', totalDollars, costMarkup + fees, Math.max(0.03, Math.abs(totalDollars) * 0.0001));
-    if ([effectiveMarkup, fees, totalDollars, gp].every((value) => value != null) && totalDollars !== 0) check('Derived margin vs. G.P.%', gp, ((effectiveMarkup + fees) / totalDollars) * 100, 0.15);
-    if ([newCount, repeatCount, totalCount].every((value) => value != null)) check('New + Repeat vs. Total prescription count', totalCount, newCount + repeatCount, 0);
+    if ([aac, costMarkup, effectiveMarkup].every((value) => value != null)) check(
+      'A.A.C. + effective markup vs. Cost + MkUp', costMarkup, aac + effectiveMarkup,
+      Math.max(0.03, Math.abs(costMarkup) * 0.0001)
+    );
+    if ([costMarkup, fees, totalDollars].every((value) => value != null)) check(
+      'Cost + MkUp + Fees vs. Total', totalDollars, costMarkup + fees,
+      Math.max(0.03, Math.abs(totalDollars) * 0.0001)
+    );
+    if ([effectiveMarkup, fees, totalDollars, gp].every((value) => value != null) && totalDollars !== 0) check(
+      'Derived margin vs. G.P.%', gp, ((effectiveMarkup + fees) / totalDollars) * 100, 0.15
+    );
+    if ([newCount, repeatCount, totalCount].every((value) => value != null)) check(
+      'New + Repeat vs. Total prescription count', totalCount, newCount + repeatCount, 0
+    );
   }
   return warnings;
 }
 
-async function recheckCells(pdf, pageIndex, boundaries, rows, centres, confidences, pageWidth, pageHeight, onProgress) {
-  const numericCols = numericColumns(rows);
-  const decimalPlaces = inferDecimalPlaces(rows);
-  const refs = new Map([...decimalPlaces.keys()].map((col) => [col, decimalReferences(rows, col)]));
-  const rendered = await renderPage(pdf, pageIndex, OCR_ZOOM, 0);
-  const scaleX = rendered.canvas.width / pageWidth;
-  const scaleY = rendered.canvas.height / pageHeight;
-  let recoveredBlank = 0;
-  let rechecked = 0;
-  try {
-    for (let r = 0; r < rows.length; r += 1) {
-      const populated = rows[r].filter((value) => String(value).trim()).length;
-      if (populated < 3) continue;
-      const [topPdf, bottomPdf] = rowBounds(centres, r);
-      for (let c = 0; c < rows[r].length; c += 1) {
-        const original = String(rows[r][c] ?? '').trim();
-        const confidence = confidences[r]?.[c] ?? null;
-        const numeric = numericCols.has(c);
-        const places = decimalPlaces.get(c);
-        const compact = original.replace(/,/g, '').replace(/%$/, '');
-        const isPotentialMissingDecimal = numeric && places != null && /^\d{3,}$/.test(compact) && repairMissingDecimal(compact, places, refs.get(c) || []);
-        const isSuspiciousNumeric = numeric && (!looksNumeric(original) || (places != null && /^\d{3,}$/.test(compact)));
-        const hasHorizontalSupport = c > 0 && !!rows[r][c - 1]?.trim() && c + 1 < rows[r].length && !!rows[r][c + 1]?.trim();
-        const hasVerticalSupport = r > 0 && !!rows[r - 1]?.[c]?.trim() && r + 1 < rows.length && !!rows[r + 1]?.[c]?.trim();
-        const isSurroundedBlank = !original && (hasHorizontalSupport || hasVerticalSupport);
-        const isLowConfidence = !!original && confidence != null && confidence < LOW_CONFIDENCE_REVIEW;
-        if (!(isSurroundedBlank || isLowConfidence || isSuspiciousNumeric)) continue;
-        if (isSurroundedBlank && c === 0 && !numeric) continue;
-
-        const left = Math.max(0, Math.floor((boundaries[c] - 2.5) * scaleX));
-        const right = Math.min(rendered.canvas.width, Math.ceil((boundaries[c + 1] + 2.5) * scaleX));
-        const top = Math.max(0, Math.floor(topPdf * scaleY));
-        const bottom = Math.min(rendered.canvas.height, Math.ceil(bottomPdf * scaleY));
-        if (right - left < 4 || bottom - top < 4) continue;
-        const crop = document.createElement('canvas');
-        crop.width = right - left; crop.height = bottom - top;
-        crop.getContext('2d').drawImage(rendered.canvas, left, top, crop.width, crop.height, 0, 0, crop.width, crop.height);
-        onProgress(`Targeted OCR recheck: page ${pageIndex + 1}, row ${r + 1}, column ${c + 1}...`);
-        let result;
-        try { result = await recognizeCell(crop, onProgress, numeric, places ?? null); }
-        finally { crop.width = 1; crop.height = 1; }
-
-        if (!result.text || result.confidence < MIN_RECHECK_CONFIDENCE) continue;
-        let candidate = result.text;
-        let candidateConfidence = result.confidence;
-        let accept = false;
-        if (!original) {
-          accept = true;
-          recoveredBlank += 1;
-        } else {
-          const originalNumeric = cleanOcrArtifact(original);
-          const originalExact = places != null && new RegExp(`^\\(?-?\\d[\\d,]*\\.\\d{${places}}%?\\)?$`).test(originalNumeric);
-          if (result.exactDecimal && !originalExact && result.confidence >= Math.max(MIN_RECHECK_CONFIDENCE, (confidence ?? 0) - 2)) accept = true;
-          else if (result.confidence >= (confidence ?? 0) + 5 && candidate !== original) accept = true;
-        }
-
-        // Decimal punctuation recovery is permitted only after an independent high-confidence
-        // image re-read confirms the digit sequence; column statistics never act alone.
-        if (numeric && places != null && /^\d+$/.test(candidate.replace(/,/g, '')) && result.confidence >= 60) {
-          const digits = candidate.replace(/,/g, '');
-          const repaired = repairMissingDecimal(digits, places, refs.get(c) || []);
-          if (repaired && (digits === original.replace(/,/g, '') || !original)) {
-            candidate = repaired;
-            accept = true;
-          }
-        }
-        if (accept) {
-          rows[r][c] = candidate;
-          confidences[r][c] = candidateConfidence;
-          rechecked += 1;
-        }
-      }
-    }
-  } finally {
-    rendered.canvas.width = 1; rendered.canvas.height = 1;
-  }
-  return { recoveredBlank, rechecked };
+function buildReviewSheet(XLSX, reviewRows, arithmeticWarnings) {
+  const rows = [
+    ['OCR REVIEW - DIAGNOSTICS ONLY'],
+    ['Original Page_X worksheet values are preserved. Arithmetic checks never modify extracted values.'],
+    ['Page', 'Excel Row', 'Excel Column', 'Extracted Value / Row', 'Confidence', 'Review Reason']
+  ];
+  for (const item of reviewRows) rows.push([item.page, item.row, item.column, item.value, item.confidence, item.reason]);
+  for (const warning of arithmeticWarnings) rows.push([warning.page, warning.row, '', warning.value, '', warning.reason]);
+  if (rows.length === 3) rows.push(['', '', '', '', '', 'No low-confidence, numeric-format or supported arithmetic diagnostics were triggered.']);
+  const sheet = XLSX.utils.aoa_to_sheet(rows);
+  sheet['!cols'] = [{ wch: 8 }, { wch: 12 }, { wch: 12 }, { wch: 28 }, { wch: 12 }, { wch: 90 }];
+  return sheet;
 }
 
-async function extractOcrWords(pdf, pageIndex, boundaries, pageWidth, pageHeight, onProgress) {
-  const rendered = await renderPage(pdf, pageIndex, OCR_ZOOM, 0);
+/** Column-by-column, padded OCR fallback. Mirrors extract_ocr_words_by_columns. */
+async function extractOcrWordsByColumns(pdf, pageIndex, boundaries, pageWidth, pageHeight, onProgress) {
+  const rendered = await renderPage(pdf, pageIndex, FIRST_PASS_ZOOM, 0);
   const scaleX = rendered.canvas.width / pageWidth;
   const scaleY = rendered.canvas.height / pageHeight;
   const words = [];
+  const cropPaddingPx = Math.max(10, Math.round(FIRST_PASS_ZOOM * 3));
+
   try {
-    const padding = Math.max(10, Math.round(OCR_ZOOM * 3));
-    for (let c = 0; c < boundaries.length - 1; c += 1) {
-      const trueLeft = Math.max(0, Math.floor(boundaries[c] * scaleX));
-      const trueRight = Math.min(rendered.canvas.width, Math.ceil(boundaries[c + 1] * scaleX));
-      const pixelLeft = Math.max(0, trueLeft - padding);
-      const pixelRight = Math.min(rendered.canvas.width, trueRight + padding);
+    for (let columnIndex = 0; columnIndex < boundaries.length - 1; columnIndex += 1) {
+      const pdfLeft = Math.max(0, Number(boundaries[columnIndex]));
+      const pdfRight = Math.min(pageWidth, Number(boundaries[columnIndex + 1]));
+      if (pdfRight <= pdfLeft) continue;
+      const truePixelLeft = Math.max(0, Math.round(pdfLeft * scaleX));
+      const truePixelRight = Math.min(rendered.canvas.width, Math.round(pdfRight * scaleX));
+      const pixelLeft = Math.max(0, truePixelLeft - cropPaddingPx);
+      const pixelRight = Math.min(rendered.canvas.width, truePixelRight + cropPaddingPx);
       if (pixelRight - pixelLeft < 3) continue;
+
       const crop = makeColumnCrop(rendered.canvas, pixelLeft, pixelRight);
       const enlargement = crop.width < 450 ? 1.75 : 1.5;
-      const prepared = makeAutocontrastCanvas(crop, enlargement, 16, 'none');
-      crop.width = 1; crop.height = 1;
-      onProgress(`OCR page ${pageIndex + 1}, column ${c + 1} of ${boundaries.length - 1}...`);
+      const prepared = makeAutocontrastCanvas(crop, enlargement, 16, false);
+      crop.width = 1;
+      crop.height = 1;
+      onProgress(`OCR page ${pageIndex + 1}, column ${columnIndex + 1} of ${boundaries.length - 1}...`);
+
       let recognized;
       try {
-        recognized = await recognizeCanvas(prepared.canvas, onProgress, { psm: 6, minConfidence: FIRST_PASS_MIN_CONFIDENCE });
-      } finally { prepared.canvas.width = 1; prepared.canvas.height = 1; }
+        recognized = await recognizeCanvas(prepared.canvas, onProgress, {
+          psm: 6,
+          minConfidence: FIRST_PASS_MIN_CONFIDENCE
+        });
+      } finally {
+        prepared.canvas.width = 1;
+        prepared.canvas.height = 1;
+      }
+
       for (const item of recognized) {
-        const localX0 = Math.max(0, (item.x0 - prepared.border) / enlargement);
-        const localX1 = Math.max(0, (item.x1 - prepared.border) / enlargement);
-        const centreX = pixelLeft + (localX0 + localX1) / 2;
-        if (!(trueLeft <= centreX && centreX < trueRight)) continue;
+        const localLeft = (item.x0 - 16) / enlargement;
+        const localTop = (item.y0 - 16) / enlargement;
+        const localWidth = (item.x1 - item.x0) / enlargement;
+        const localHeight = (item.y1 - item.y0) / enlargement;
+        const leftPx = pixelLeft + Math.max(0, localLeft);
+        const rightPx = leftPx + localWidth;
+        const centrePx = (leftPx + rightPx) / 2;
+        if (!(truePixelLeft <= centrePx && centrePx < truePixelRight)) continue;
+        const left = leftPx / scaleX;
+        const top = Math.max(0, localTop) / scaleY;
+        const width = localWidth / scaleX;
+        const height = localHeight / scaleY;
         words.push({
-          x0: (pixelLeft + localX0) / scaleX,
-          x1: (pixelLeft + localX1) / scaleX,
-          y0: Math.max(0, (item.y0 - prepared.border) / enlargement) / scaleY,
-          y1: Math.max(0, (item.y1 - prepared.border) / enlargement) / scaleY,
+          x0: left,
+          y0: top,
+          x1: left + width,
+          y1: top + height,
           text: item.text,
           confidence: item.confidence,
           block: item.block,
           paragraph: item.paragraph,
           line: item.line,
-          column: c
+          column: columnIndex
         });
       }
     }
-  } finally { rendered.canvas.width = 1; rendered.canvas.height = 1; }
+  } finally {
+    rendered.canvas.width = 1;
+    rendered.canvas.height = 1;
+  }
   return words;
-}
-
-function buildReviewSheet(XLSX, reviewRows, arithmeticWarnings) {
-  const aoa = [
-    ['OCR REVIEW - DIAGNOSTICS ONLY'],
-    ['Original Page_X worksheet values are preserved. Arithmetic checks never modify extracted values.'],
-    ['Page', 'Excel Row', 'Excel Column', 'Extracted Value / Row', 'Confidence', 'Review Reason']
-  ];
-  for (const item of reviewRows) aoa.push([item.page, item.row, item.column, item.value, item.confidence, item.reason]);
-  for (const warning of arithmeticWarnings) aoa.push([warning.page, warning.row, '', warning.value, '', warning.reason]);
-  if (aoa.length === 3) aoa.push(['', '', '', '', '', 'No low-confidence, numeric-format or supported arithmetic diagnostics were triggered.']);
-  const sheet = XLSX.utils.aoa_to_sheet(aoa);
-  sheet['!cols'] = [{ wch: 8 }, { wch: 12 }, { wch: 12 }, { wch: 28 }, { wch: 12 }, { wch: 90 }];
-  return sheet;
 }
 
 export async function generateWorkbook(pdf, columnsByPage, onProgress = () => {}) {
@@ -494,43 +705,79 @@ export async function generateWorkbook(pdf, columnsByPage, onProgress = () => {}
   let numericRechecked = 0;
   let wroteSheet = false;
 
-  for (let p = 0; p < pdf.numPages; p += 1) {
-    const raw = columnsByPage.get(p) || [];
-    if (!raw.length) continue;
-    onProgress(`Extracting page ${p + 1} of ${pdf.numPages}...`);
-    const page = await pdf.getPage(p + 1);
+  for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex += 1) {
+    const rawColumns = columnsByPage.get(pageIndex) || [];
+    if (!rawColumns.length) continue;
+    onProgress(`Extracting page ${pageIndex + 1} of ${pdf.numPages}...`);
+    const page = await pdf.getPage(pageIndex + 1);
     const viewport = page.getViewport({ scale: 1 });
-    const width = viewport.width, height = viewport.height;
-    const boundaries = [0, ...raw.map((x) => x / 1.5).sort((a, b) => a - b), width];
+    const pageWidth = viewport.width;
+    const pageHeight = viewport.height;
+    const pdfColumns = [...rawColumns].sort((a, b) => a - b).map((x) => x / 1.5);
+    const boundaries = [0, ...pdfColumns, pageWidth];
+
+    // Exact workflow: native PDF words first; OCR only when no native words exist.
     let words = await getNativeWords(page);
     const usedOcr = words.length === 0;
     if (usedOcr) {
-      usedOcrPages.push(p + 1);
-      words = await extractOcrWords(pdf, p, boundaries, width, height, onProgress);
+      usedOcrPages.push(pageIndex + 1);
+      words = await extractOcrWordsByColumns(pdf, pageIndex, boundaries, pageWidth, pageHeight, onProgress);
     }
 
-    let { rows, centres, confidences } = assembleRows(words, boundaries, usedOcr ? 4.0 : 4.0);
+    const { rows, centres, confidences } = buildTableRowsWithGeometry(
+      words,
+      boundaries,
+      usedOcr ? OCR_ROW_TOLERANCE : NATIVE_ROW_TOLERANCE
+    );
+
     if (usedOcr && rows.length) {
-      onProgress(`Recovering suspicious OCR cells on page ${p + 1}...`);
-      const recovered = await recheckCells(pdf, p, boundaries, rows, centres, confidences, width, height, onProgress);
-      blankRecovered += recovered.recoveredBlank;
-      numericRechecked += recovered.rechecked;
+      // The two Python recovery passes share one 5x page render and one crop cache.
+      onProgress(`Preparing targeted OCR recovery for page ${pageIndex + 1}...`);
+      const recoveryRender = await renderPage(pdf, pageIndex, RECOVERY_ZOOM, 0);
+      const cache = createOcrPageCache(recoveryRender.canvas, pageWidth, pageHeight);
+      try {
+        onProgress(`Recovering surrounded blank cells on page ${pageIndex + 1}...`);
+        blankRecovered += await recoverBlankOcrCells(
+          cache, boundaries, rows, centres, onProgress, pageIndex + 1
+        );
+        normalizeOcrTableValues(rows);
+        onProgress(`Recovering suspicious numeric cells on page ${pageIndex + 1}...`);
+        numericRechecked += await recoverSuspiciousNumericCells(
+          cache, boundaries, rows, centres, onProgress, pageIndex + 1
+        );
+      } finally {
+        closeOcrPageCache(cache);
+      }
     }
 
-    rows = rows.map((row) => row.map((cell) => cleanNumeric(cleanOcrArtifact(cell))));
-    const numericCols = numericColumns(rows);
-    const decimalPlaces = inferDecimalPlaces(rows);
-    allReviewRows.push(...collectOcrReview(rows, confidences, numericCols, decimalPlaces, p + 1));
-    arithmeticWarnings.push(...planSummaryArithmeticDiagnostics(rows, p + 1));
-    const sheet = XLSX.utils.aoa_to_sheet(rows);
-    XLSX.utils.book_append_sheet(workbook, sheet, `Page_${p + 1}`);
+    // Match normalize_ocr_table_values followed by clean_numeric_string cell-by-cell.
+    normalizeOcrTableValues(rows);
+    const convertedRows = rows.map((row) => row.map(cleanNumericString));
+    const numericCols = numericColumnsForReview(rows);
+    const decimalPlaces = inferColumnDecimalPlaces(rows);
+    allReviewRows.push(...collectOcrReview(rows, confidences, numericCols, decimalPlaces, pageIndex + 1));
+    arithmeticWarnings.push(...planSummaryArithmeticDiagnostics(rows, pageIndex + 1));
+
+    const sheet = XLSX.utils.aoa_to_sheet(convertedRows);
+    XLSX.utils.book_append_sheet(workbook, sheet, `Page_${pageIndex + 1}`);
     wroteSheet = true;
   }
 
-  if (!wroteSheet) XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['No columns marked or no extractable text found.']]), 'Result');
-  if (allReviewRows.length || arithmeticWarnings.length) {
-    XLSX.utils.book_append_sheet(workbook, buildReviewSheet(XLSX, allReviewRows, arithmeticWarnings), 'OCR Review');
+  if (!wroteSheet) {
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.aoa_to_sheet([['No columns marked or no extractable text found.']]),
+      'Result'
+    );
   }
+  if (allReviewRows.length || arithmeticWarnings.length) {
+    XLSX.utils.book_append_sheet(
+      workbook,
+      buildReviewSheet(XLSX, allReviewRows, arithmeticWarnings),
+      'OCR Review'
+    );
+  }
+
   return {
     bytes: XLSX.write(workbook, { bookType: 'xlsx', type: 'array' }),
     usedOcrPages,

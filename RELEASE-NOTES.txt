@@ -1,22 +1,16 @@
-PDF Tools v1.0.5
+PDF Tools v1.0.6
 
-OCR accuracy and review update.
+XLSX workflow parity release.
 
-- Increased scanned-page OCR render resolution to 5.5x, with page-size based on PDF points and source image density.
-- Added grayscale histogram autocontrast and high-quality enlargement before first-pass OCR.
-- Restored the source Streamlit workflow's first-pass minimum word confidence of 10.
-- Preserved per-word confidence scores and added per-cell confidence diagnostics.
-- Improved row grouping with stable median anchors to reduce drift between columns.
-- Added targeted cell-level OCR retries using multiple page segmentation modes and an adaptive-threshold variant.
-- Added cautious decimal punctuation recovery: a column pattern alone cannot change a cell; a high-confidence image re-read must confirm the same digits first.
-- Added safe removal of leading OCR '=' or '|' artefacts only when the remainder is a valid numeric token.
-- Added an OCR Review worksheet for low-confidence, malformed numeric and supported arithmetic diagnostics.
-- Arithmetic checks are diagnostic only. They never change, replace, or repair values in Page_N worksheets.
-- Arithmetic diagnostics are enabled only when a Plan Summary Report layout is detected; unrelated documents do not receive assumed formula checks.
-- Kept the flat GitHub Pages repository-root structure and browser-local PDF processing.
+- Restored the Streamlit sequence: native text first, OCR fallback only when no native words are present.
+- First-pass OCR now uses 4.0x rendering, independently padded column crops, grayscale/full-range autocontrast, the original width-based 1.75x/1.5x enlargement, 16px border, PSM 6, and confidence >= 10.
+- Restored the original row grouping order, first-match placement and pairwise row-centre averaging.
+- Restored separate 6pt OCR and 4pt native row tolerances.
+- Second-pass recovery uses a single 5.0x page render and a shared crop cache.
+- Blank-cell recovery follows the original neighbour-support, row-population and first-column/numeric-column rules.
+- Cell OCR follows the original PSM 7/8/13 sequence, 4x enlargement, 24px border, confidence scoring, immediate-stop rules and thresholded fallback.
+- Numeric recovery uses original 5+-digit eligibility, decimal-precision inference, magnitude references and repair thresholds.
+- Numeric spacing normalization and cell-by-cell numeric conversion mirror the supplied Python implementation.
+- Arithmetic consistency checks remain warnings only and never modify extracted data.
 
-Validation:
-- JavaScript syntax checks passed for every application module.
-- ZIP integrity and root-only structure checks passed.
-- Sample source PDF and previous XLSX were inspected to guide the changes.
-- The full GitHub Pages browser workflow and Paddle-free Tesseract.js network loading were not executable in this environment; live browser verification remains required.
+All files remain in the GitHub repository root. Browser-side JavaScript syntax and package checks are run before delivery; full browser integration remains to be verified in the deployed site.

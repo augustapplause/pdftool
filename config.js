@@ -1,4 +1,4 @@
-export const APP_VERSION = '1.0.5';
+export const APP_VERSION = '1.0.6';
 export const RENDER_ZOOM = 1.5;
 export const TOOL_LABELS = {
   redact: 'Redact PDF',
